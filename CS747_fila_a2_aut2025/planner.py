@@ -4,7 +4,7 @@ import argparse
 import sys
 import os
 import numpy as np
-from copy import deepcopy
+from pulp import *
 
 def parse_arguments():
     """
@@ -257,19 +257,48 @@ def solve_mdp_hpi(mdp_data, verbose=False):
 
     return optimal_values, optimal_policy
     
-def solve_mdp_lp(mdp_data, policy=None):
+def solve_mdp_lp(mdp_data, verbose=False):
     """
     Solve MDP using Linear Programming.
     
     Args:
         mdp_data: MDP data structure
-        policy: Optional policy for value function evaluation
     """
-    print("Using Linear Programming (LP) algorithm")
-    if policy:
-        print("Evaluating value function for given policy")
-    # TODO: Implement LP algorithm
-    pass
+    # Step 0: Load MDP
+    P, R, num_states, num_actions, gamma = mdp_data
+
+    # Step 1: Define the problem
+    prob = LpProblem("MDP_Optimal_State_Value_Calculation", LpMaximize)
+
+    # Step 2: Define the variables
+    state_values = [LpVariable(f"V_{i}", lowBound=None) for i in range(num_states)]
+
+    # Step 3: Add objective function
+    prob += (-1 * sum(state_values)), "NegativeOfSumOfStateValues"
+
+    # Step 4: Add the constraints
+    constraint_cnt = 1
+    for s in range(num_states):
+        for a in range(num_actions):
+            constraint = -state_values[s] + np.sum(P[s, a, :] * R[s, a, :]) + lpSum(gamma * P[s, a, s_next] * state_values[s_next] for s_next in range(num_states))
+
+            prob += (constraint <= 0), f"Constraint{constraint_cnt}"
+            constraint_cnt += 1
+
+    # Step 5: Solve the LP
+    prob.solve(PULP_CBC_CMD(msg=False))
+    
+    # Step 6: Pick optimal value function and use that to backtrack the optimal policy
+
+    optimal_values = [v.varValue for v in state_values]
+    action_values = evaluate_action_values(mdp_data, np.array(optimal_values))
+    optimal_policy = np.argmax(action_values, axis=1).tolist()
+
+    if verbose:
+        for v, a in zip(optimal_values, optimal_policy):
+            print(f"{v:.6f}", a)
+
+    return optimal_values, optimal_policy
 
 def main():
     """
@@ -291,7 +320,7 @@ def main():
     elif args.algorithm == 'hpi':
         solve_mdp_hpi(mdp_data, verbose=True)
     elif args.algorithm == 'lp':
-        solve_mdp_lp(mdp_data, policy)
+        solve_mdp_lp(mdp_data, verbose=True)
     else:
         print(f"Error: Unknown algorithm '{args.algorithm}'", file=sys.stderr)
         sys.exit(1)
