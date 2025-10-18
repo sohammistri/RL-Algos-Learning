@@ -112,7 +112,7 @@ class MDP:
         # 0 for draw, 1-26 for swap and 27 for stop
 
         # final out string
-        self.out_string = f"numStates {self.num_states}\nnumActions {self.num_actions}\nend {" ".join(str(s) for s in self.stop_states)}"
+        print(f"numStates {self.num_states}\nnumActions {self.num_actions}\nend {" ".join(str(s) for s in self.stop_states)}")
 
         # self.P = np.zeros((self.num_states, self.num_actions, self.num_states), dtype=np.float32)
         # self.R = np.zeros((self.num_states, self.num_actions, self.num_states), dtype=np.int8)
@@ -159,7 +159,7 @@ class MDP:
         # print("Validation passed: Rewards are 0 everywhere except for action 27 (stop) to state 0 (STOP) and Probs are well defined")
 
         # update the last few entries in the out string
-        self.out_string += "\nmdptype episodic\ndiscount  1.0"
+        print("mdptype episodic\ndiscount  1.0")
 
     def create_hands(self, cur_hand, cur_card_id):
         # Base case: if all cards have been considered
@@ -195,6 +195,8 @@ class MDP:
         hand = state.hand
         num_deck_cards = 26 - sum(hand)
 
+        probs = dict()
+
         for card_id, card in enumerate(hand):
             if card == 0:
                 # card eligible to be drawn
@@ -205,14 +207,17 @@ class MDP:
                 state_total = new_state.get_hand_total()
 
                 if state_total > self.threshold:
-                    # Bust
-                    # self.P[id, 0, 1] += (1 / num_deck_cards)
-                    self.out_string += f"\ntransition {id} 0 1 0 {(1 / num_deck_cards)}"
+                    probs[self.states_to_id["BUST"]] = probs.get(self.states_to_id["BUST"], 0) + (1 / num_deck_cards)
                 else:
                     # transition to next state
                     new_state_id = self.states_to_id[new_state]
-                    # self.P[id, 0, new_state_id] += (1 / num_deck_cards)
-                    self.out_string += f"\ntransition {id} 0 {new_state_id} 0 {(1 / num_deck_cards)}"
+                    probs[new_state_id] = probs.get(new_state_id, 0) + (1 / num_deck_cards)
+        
+
+        assert np.isclose(sum(probs.values()), 1.0)
+
+        for s, p in probs.items():
+            print(f"transition {id} 0 {s} 0 {p}")
 
     def swap(self, id, state):
         hand = state.hand
@@ -221,56 +226,54 @@ class MDP:
 
         for card_id, card in enumerate(hand):
             action_id = card_id + 1
+            probs = dict()
             if card == 1:
-                # card eligible to be swapped
+                # card present eligible for swap
                 for new_card_id in deck_cards:
                     new_state = Hand(list(hand))
-
-                    # update new state and get total
                     new_state.update(added_card_id=new_card_id, removed_card_id=card_id)
-                    state_total = new_state.get_hand_total()
+                    new_hand_total = new_state.get_hand_total()
 
-                    if state_total > self.threshold:
-                        # Bust
-                        # self.P[id, action_id, 1] += (1 / num_deck_cards)
-                        self.out_string += f"\ntransition {id} {action_id} 1 0 {(1 / num_deck_cards)}"
+                    if new_hand_total > self.threshold:
+                        # bust
+                        probs[self.states_to_id["BUST"]] = probs.get(self.states_to_id["BUST"], 0) + (1 / num_deck_cards)
                     else:
                         # transition to next state
                         new_state_id = self.states_to_id[new_state]
-                        # self.P[id, action_id, new_state_id] += (1 / num_deck_cards)
-                        self.out_string += f"\ntransition {id} {action_id} {new_state_id} 0 {(1 / num_deck_cards)}"
+                        probs[new_state_id] = probs.get(new_state_id, 0) + (1 / num_deck_cards)
             else:
-                # keep well defined probs for inelgible action
-                # self.P[id, action_id, id] = 1.0
-                self.out_string += f"\ntransition {id} {action_id} {id} 0 1.0"
+                probs[id] = 1.0
+
+            assert np.isclose(sum(probs.values()), 1.0)
+
+            for s, p in probs.items():
+                print(f"transition {id} {action_id} {s} 0 {p}")
+
 
     def stop(self, id, state):
         # init reward to the total
         reward = state.get_hand_total()
 
-        # next search for special sequences
+        # Check for the special seq
         hand = state.hand
-        if len(hand) >= 3:
-            for i in range(len(hand) - 2):
-                if hand[i : i + 3] == tuple(self.sequence):
-                    reward += self.bonus
-                    break
+        sequence_present = True
+        for card_value in self.sequence:
+            # Check if either the Diamond or Heart card of that value is in the hand
+            # Card indices are value-1 for Diamonds and value-1+13 for Hearts
+            diamond_card_idx = card_value - 1
+            heart_card_idx = card_value - 1 + 13
+            if not (hand[diamond_card_idx] == 1 or hand[heart_card_idx] == 1):
+                sequence_present = False
+                break
+
+        if sequence_present:
+            reward += self.bonus
 
         # fill matrices
         # self.P[id, 27, 0] = 1.0
         # self.R[id, 27, 0] = reward
-        self.out_string += f"\ntransition {id} 27 0 {reward} 1.0"
+        print(f"transition {id} 27 {self.states_to_id["STOP"]} {reward} 1.0")
 
-    def __repr__(self):
-        """
-        String representation of the MDP object
-        
-        Returns:
-            str: String representation
-        """
-        return self.out_string
-
-            
 
 def parse_arguments():
     """
@@ -394,7 +397,7 @@ def main():
     
     # Create MDP
     mdp = MDP(threshold, bonus, sequence)
-    print(mdp)
+    # print(mdp)
     
 
 if __name__ == "__main__":
