@@ -12,7 +12,6 @@ class Hand:
         """
         self.hand = list(hand)
 
-
     def get_hand_total(self):
         """
         Return the total cost of the hand
@@ -91,7 +90,9 @@ class Hand:
         return f"Hand({self.hand})"
 
 class MDP:
-    def __init__(self, threshold, bonus, sequence):
+    def __init__(self, threshold, bonus, sequence, verbose=True):
+        self.verbose = verbose
+
         # states info
         self.states_to_id = {"STOP": 0, "BUST": 1}
         self.id_to_states = {0: "STOP", 1: "BUST"}
@@ -112,7 +113,8 @@ class MDP:
         # 0 for draw, 1-26 for swap and 27 for stop
 
         # final out string
-        print(f"numStates {self.num_states}\nnumActions {self.num_actions}\nend {" ".join(str(s) for s in self.stop_states)}")
+        if self.verbose:
+            print(f"numStates {str(self.num_states)}\nnumActions {str(self.num_actions)}\nend {" ".join(str(s) for s in self.stop_states)}")
 
         # self.P = np.zeros((self.num_states, self.num_actions, self.num_states), dtype=np.float32)
         # self.R = np.zeros((self.num_states, self.num_actions, self.num_states), dtype=np.int8)
@@ -159,7 +161,8 @@ class MDP:
         # print("Validation passed: Rewards are 0 everywhere except for action 27 (stop) to state 0 (STOP) and Probs are well defined")
 
         # update the last few entries in the out string
-        print("mdptype episodic\ndiscount  1.0")
+        if self.verbose:
+            print("mdptype episodic\ndiscount  0.9")
 
     def create_hands(self, cur_hand, cur_card_id):
         # Base case: if all cards have been considered
@@ -216,8 +219,9 @@ class MDP:
 
         assert np.isclose(sum(probs.values()), 1.0)
 
-        for s, p in probs.items():
-            print(f"transition {id} 0 {s} 0 {p}")
+        if self.verbose:
+            for s, p in probs.items():
+                print(f"transition {str(id)} 0 {str(s)} 0 {str(p)}")
 
     def swap(self, id, state):
         hand = state.hand
@@ -246,8 +250,9 @@ class MDP:
 
             assert np.isclose(sum(probs.values()), 1.0)
 
-            for s, p in probs.items():
-                print(f"transition {id} {action_id} {s} 0 {p}")
+            if self.verbose:
+                for s, p in probs.items():
+                    print(f"transition {str(id)} {str(action_id)} {str(s)} 0 {str(p)}")
 
 
     def stop(self, id, state):
@@ -272,7 +277,8 @@ class MDP:
         # fill matrices
         # self.P[id, 27, 0] = 1.0
         # self.R[id, 27, 0] = reward
-        print(f"transition {id} 27 {self.states_to_id["STOP"]} {reward} 1.0")
+        if self.verbose:
+            print(f"transition {str(id)} 27 {str(self.states_to_id["STOP"])} {str(reward)} 1.0")
 
 
 def parse_arguments():

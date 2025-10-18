@@ -92,10 +92,10 @@ def load_mdp(mdp_file):
     with open(mdp_file, 'r') as f:
         lines = f.readlines()
         for line in lines:
-            line = line.strip()
+            line = str(line).strip()
             if line:  # Skip empty lines
                 split_line = line.split()
-                # Process each line as needed to build the MDP structure
+                    # Process each line as needed to build the MDP structure
                 if split_line[0] == 'numStates':
                     num_states = int(split_line[1])
                 elif split_line[0] == 'numActions':
@@ -115,23 +115,30 @@ def load_mdp(mdp_file):
                 elif split_line[0] == 'discount':
                     gamma = float(split_line[1])
 
-    # Step 2: Create the state transition prob and reward matrices
-    P, R = np.zeros((num_states, num_actions, num_states)), np.zeros((num_states, num_actions, num_states))
+    # Step 2: Create the state transition prob and reward matrices, able to handle sparse cases
+    P_R_dict = dict()
     for (s, a, s_next, r, p) in transitions:
-        P[s, a, s_next] += p
-        R[s, a, s_next] = r  
+        if (s, a) not in P_R_dict:
+            P_R_dict[(s, a)] = {"probs": np.zeros(num_states), "rewards": np.zeros(num_states)} # P, R dict
+
+        P_R_dict[(s, a)]["probs"][s_next] += p
+        P_R_dict[(s, a)]["rewards"][s_next] += r
 
     if mdp_type == 'episodic':
         for s in end_states:
-            P[s, :, s] = 1
+            for a in range(num_actions):
+                if (s, a) not in P_R_dict:
+                    P_R_dict[(s, a)] = {"probs": np.zeros(num_states), "rewards": np.zeros(num_states)} # P, R dict
+                
+                P_R_dict[(s, a)]["probs"][s_next] += 1.0
 
     # assert for every state-action pair, sum of transition probabilities is 1
     for s in range(num_states):     
         for a in range(num_actions):
-            if not np.isclose(np.sum(P[s, a, :]), 1):
+            if ((s, a) in P_R_dict) and (not np.isclose(np.sum(P_R_dict[(s, a)]["probs"]), 1)):
                 print(f"Warning: Transition probabilities for state {s}, action {a} do not sum to 1.", file=sys.stderr)
 
-    return P, R, num_states, num_actions, gamma
+    return P_R_dict, num_states, num_actions, gamma
 
 def load_policy(policy_file):
     """
@@ -187,10 +194,11 @@ def evaluate_policy(mdp_data, policy, tolerance=1e-8, compute_action_values=Fals
         policy (list): list of actions to be taken per state
     """
     # Step 0: Load MDP
-    P, R, num_states, num_actions, gamma = mdp_data
+    P_R_dict, num_states, num_actions, gamma = mdp_data
 
     # Step 1: define present and computed state value functions
-    v_pi, cur = np.random.randn(num_states), None
+    # v_pi, cur = np.random.randn(num_states), None
+    v_pi, cur = np.zeros(num_states), None
 
     # Step 2: iterate until convergence of value function
     while True:
@@ -199,7 +207,11 @@ def evaluate_policy(mdp_data, policy, tolerance=1e-8, compute_action_values=Fals
             v_pi = cur.copy()
 
         # Step 2.2: Take P_pi and R_pi
-        P_pi, R_pi = P[np.arange(num_states), policy, :], R[np.arange(num_states), policy, :] # they are of shapes (s, s)
+        P_pi, R_pi = np.zeros((num_states, num_states)), np.zeros((num_states, num_states))
+        for s, a in zip(range(num_states), policy):
+            if (s, a) in P_R_dict:
+                P_pi[s, :] = P_R_dict[(s, a)]["probs"].copy()
+                R_pi[s, :] = P_R_dict[(s, a)]["rewards"].copy()
 
         # Step 2.3: Write the BellMan Equation for this
         cur =np.sum(P_pi * R_pi, axis=1) + gamma * (P_pi @ v_pi)
@@ -230,7 +242,8 @@ def solve_mdp_hpi(mdp_data, verbose=False):
     P, R, num_states, num_actions, gamma = mdp_data
 
     # Step 1: Initialise a random policy
-    policy = np.random.randint(0, num_actions, size=num_states)
+    # policy = np.random.randint(0, num_actions, size=num_states)
+    policy = np.zeros(num_states)
     v, q, optimal_policy, optimal_values = None, None, None, None
 
     while True:
@@ -257,7 +270,7 @@ def solve_mdp_hpi(mdp_data, verbose=False):
 
     return optimal_values, optimal_policy
 
-def solve_mdp_vi(mdp_data, tolerance=1e-8, verbose=False):
+def solve_mdp_vi(mdp_data, tolerance=1e-4, verbose=False):
     """
     Solve MDP using Value Iteration.
     
@@ -268,7 +281,8 @@ def solve_mdp_vi(mdp_data, tolerance=1e-8, verbose=False):
     P, R, num_states, num_actions, gamma = mdp_data
 
     # Step 1: Load a random value function
-    v = np.random.randn(num_states) #size (num_states)
+    # v = np.random.randn(num_states) #size (num_states)
+    v = np.zeros(num_states) #size (num_states)
     cur_v, policy, optimal_policy, optimal_values = None, None, None, None
 
     # Step 2: Loop until convergence
