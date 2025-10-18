@@ -1,4 +1,4 @@
-#! /usr/bin/python3
+
 from email import policy
 import random,argparse,sys,subprocess,os
 parser = argparse.ArgumentParser()
@@ -25,16 +25,16 @@ class VerifyOutputPlanner:
             for in_file in input_file_ls:
                 print("\n\n","-"*100)
                 if algo == 'default':
-                    cmd_planner = "python3","planner.py","--mdp",in_file
+                    cmd_planner = r"..\cs747_env\Scripts\python.exe","planner.py","--mdp",in_file
                 else:
-                    cmd_planner = "python3","planner.py","--mdp",in_file,"--algorithm",algo
+                    cmd_planner = r"..\cs747_env\Scripts\python.exe","planner.py","--mdp",in_file,"--algorithm",algo
                 print('test case',str(counter),algo,":\t"," ".join(cmd_planner))
                 counter+=1
                 cmd_output = subprocess.check_output(cmd_planner,universal_newlines=True)
                 self.verifyOutput(cmd_output,in_file,print_error)
         policy_eval_files = ['data/mdp/continuing-mdp-10-5.txt', 'data/mdp/episodic-mdp-10-5.txt']
         for in_file in policy_eval_files:
-            cmd_planner = "python3","planner.py","--mdp",in_file, "--policy", in_file.replace("continuing","policy-continuing").replace("episodic","policy-episodic")
+            cmd_planner = r"..\cs747_env\Scripts\python.exe","planner.py","--mdp",in_file, "--policy", in_file.replace("continuing","policy-continuing").replace("episodic","policy-episodic")
             print('test case',str(counter),'policy evaluation',":\t"," ".join(cmd_planner))
             counter+=1
             cmd_output = subprocess.check_output(cmd_planner,universal_newlines=True)
@@ -88,19 +88,19 @@ class VerifyOutputPlanner:
                     print("\tNot OK")
 
 def run(gameconfig, test):
-    cmd_encoder = "python3", "encoder.py", "--game_config", gameconfig
+    cmd_encoder = r"..\cs747_env\Scripts\python.exe", "encoder.py", "--game_config", gameconfig
     print("\n","Generating the MDP encoding using encoder.py")
     f = open('verify_attt_mdp','w')
     subprocess.call(cmd_encoder,stdout=f)
     f.close()
 
-    cmd_planner = "python3","planner.py","--mdp","verify_attt_mdp"
+    cmd_planner = r"..\cs747_env\Scripts\python.exe","planner.py","--mdp","verify_attt_mdp"
     print("\n","Generating the value policy file using planner.py using default algorithm")
     f = open('verify_attt_planner','w')
     subprocess.call(cmd_planner,stdout=f)
     f.close()
 
-    cmd_decoder = "python3","decoder.py","--value_policy","verify_attt_planner","--testcase",test
+    cmd_decoder = r"..\cs747_env\Scripts\python.exe","decoder.py","--value_policy","verify_attt_planner","--testcase",test
     print("\n","Generating the decoded policy file using decoder.py")
     
     cmd_output = subprocess.check_output(cmd_decoder,universal_newlines=True)

@@ -36,10 +36,10 @@ Examples:
     parser.add_argument(
         '--algorithm',
         type=str,
-        choices=['hpi', 'lp'],
+        choices=['hpi', 'vi', 'lp'],
         default='hpi',
         required=False,
-        help='Algorithm to use: hpi (Howard Policy Iteration) or lp (Linear Programming). Default: hpi'
+        help='Algorithm to use: hpi (Howard Policy Iteration), vi (Value Iteration) or lp (Linear Programming). Default: hpi'
     )
     
     # Optional policy file argument
@@ -256,7 +256,46 @@ def solve_mdp_hpi(mdp_data, verbose=False):
             print(f"{v:.6f}", a)
 
     return optimal_values, optimal_policy
+
+def solve_mdp_vi(mdp_data, tolerance=1e-8, verbose=False):
+    """
+    Solve MDP using Value Iteration.
     
+    Args:
+        mdp_data: MDP data structure
+    """
+    # Step 0: Load MDP
+    P, R, num_states, num_actions, gamma = mdp_data
+
+    # Step 1: Load a random value function
+    v = np.random.randn(num_states) #size (num_states)
+    cur_v, policy, optimal_policy, optimal_values = None, None, None, None
+
+    # Step 2: Loop until convergence
+    while True:
+        # Step 2.1: Compute q values for v
+        q = evaluate_action_values(mdp_data, v) # (num_states, num_actions)
+
+        # Step 2.2: Find greedy policy and new state values
+        cur_v = np.max(q, axis=1) # (num_states)
+        policy = np.argmax(q, axis=1)
+
+        # Step 2.3: Check for convergence of value function
+        if np.linalg.norm(v - cur_v) < tolerance:
+            optimal_values = cur_v.copy()
+            optimal_policy = policy.copy()
+            break
+        else:
+            v = cur_v.copy()
+
+    if verbose:
+        optimal_values_list, optimal_policy_list = optimal_values.tolist(), optimal_policy.tolist()
+
+        for v, a in zip(optimal_values_list, optimal_policy_list):
+            print(f"{v:.6f}", a)
+
+    return optimal_values, optimal_policy
+
 def solve_mdp_lp(mdp_data, verbose=False):
     """
     Solve MDP using Linear Programming.
@@ -319,6 +358,8 @@ def main():
         evaluate_policy(mdp_data, policy, verbose=True)
     elif args.algorithm == 'hpi':
         solve_mdp_hpi(mdp_data, verbose=True)
+    elif args.algorithm == "vi":
+        solve_mdp_vi(mdp_data, verbose=True)
     elif args.algorithm == 'lp':
         solve_mdp_lp(mdp_data, verbose=True)
     else:
