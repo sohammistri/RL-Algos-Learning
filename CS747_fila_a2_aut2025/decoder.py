@@ -4,6 +4,7 @@ import argparse
 import sys
 import os
 import numpy as np
+import pickle
 from encoder import MDP, Hand
 
 def parse_arguments():
@@ -17,8 +18,9 @@ def parse_arguments():
         description='Decoder - Determine optimal actions for test cases using value policy',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Example:
+Examples:
   python decoder.py --value_policy output/value_policy.txt --testcase data/test/test_0.txt
+  python decoder.py --value_policy output/value_policy.txt --automate results/optimal_policy.txt
         """
     )
     
@@ -34,8 +36,16 @@ Example:
     parser.add_argument(
         '--testcase',
         type=str,
-        required=True,
+        required=False,
         help='Path to the testcase file (required)'
+    )
+    
+    # Optional automate file argument
+    parser.add_argument(
+        '--automate',
+        type=str,
+        required=False,
+        help='Path to output file for automated optimal policy. If specified, writes optimal actions for all possible hands to file instead of stdout (optional)'
     )
     
     return parser.parse_args()
@@ -56,9 +66,10 @@ def validate_arguments(args):
         return False
     
     # Check if testcase file exists
-    if not os.path.isfile(args.testcase):
-        print(f"Error: Testcase file '{args.testcase}' does not exist.", file=sys.stderr)
-        return False
+    if args.testcase:
+        if not os.path.isfile(args.testcase):
+            print(f"Error: Testcase file '{args.testcase}' does not exist.", file=sys.stderr)
+            return False
     
     return True
 
@@ -179,6 +190,38 @@ def parse_hand_string(hand_str):
     
     return hand
 
+def load_state_mappings(pickle_file='state_mappings.pkl'):
+    """
+    Load state mappings from pickle file.
+    
+    Args:
+        pickle_file (str): Path to pickle file containing state mappings
+        
+    Returns:
+        dict: Dictionary containing states_to_id, id_to_states, and config info
+    """
+    try:
+        with open(pickle_file, 'rb') as f:
+            state_data = pickle.load(f)
+        return state_data
+    except (IOError, pickle.PickleError) as e:
+        print(f"Error loading state mappings from {pickle_file}: {e}", file=sys.stderr)
+        return None
+
+def decode_state(state):
+    hand_one_hot = state.hand
+
+    hand = []
+    for i, h in enumerate(hand_one_hot):
+        if h == 1 and i < 13:
+            # hearts card
+            hand.append(f"{i + 1}H")
+        elif h == 1:
+            # diamond card
+            hand.append(f"{i - 12}D")
+
+    return " ".join(hand)
+
 def main():
     """
     Main function to run the decoder.
@@ -197,30 +240,69 @@ def main():
         print("Error: Failed to load value-policy.", file=sys.stderr)
         sys.exit(1)
     
-    # Parse testcase
-    config, instances = parse_testcase(args.testcase)
+    # Load state mappings from pickle file
+    pickle_path = r'state_mappings.pkl'
+    state_data = load_state_mappings(pickle_path)
     
-    if config is None or instances is None:
-        print("Error: Failed to parse testcase.", file=sys.stderr)
+    if state_data is None:
+        print("Error: Failed to load state mappings.", file=sys.stderr)
         sys.exit(1)
     
-    threshold, bonus, sequence = config
-    mdp = MDP(threshold, bonus, sequence, verbose=False)
+    states_to_id = state_data['states_to_id']
+    id_to_states = state_data['id_to_states']
     
-    # Process each test instance
-    for instance in instances:
-        # print(instance)
-        # Parse hand string to binary representation
-        hand = parse_hand_string(instance)
+    if args.automate:
+        try:
+            # Create automate directory if it doesn't exist
+            automate_dir = os.path.dirname(args.automate)
+            if automate_dir and not os.path.exists(automate_dir):
+                os.makedirs(automate_dir)
+            
+            out_strings = []
+            with open(args.automate, 'w') as f:
+                # Write optimal policy for all states (excluding STOP and BUST)
+                for state_id in sorted(id_to_states.keys()):
+                    if state_id <= 1:  # Skip STOP and BUST states
+                        continue
+                    
+                    state = id_to_states[state_id]
+                    hand = decode_state(state)
+                    optimal_action = policy[state_id]
+                    
+                    # Write state ID, hand representation, and optimal action
+                    out_strings.append(f"{hand} -> {optimal_action}")
+
+                out_strings = sorted(out_strings)
+
+                for o in out_strings:
+                    f.write(o + "\n")
+                
+            # print(f"Optimal policy for all possible hands written to {args.automate}", file=sys.stderr)
         
-        # Convert hand to state ID (TODO: needs state mapping from encoder)
-        state_id = mdp.states_to_id[Hand(list(hand))]
+        except IOError as e:
+            print(f"Error writing automate file: {e}", file=sys.stderr)
+            sys.exit(1)
+    elif args.testcase:
+        # Parse testcase
+        config, instances = parse_testcase(args.testcase)
         
-        # Get optimal action
-        optimal_action = policy[state_id]
+        if config is None or instances is None:
+            print("Error: Failed to parse testcase.", file=sys.stderr)
+            sys.exit(1)
         
-        # Print optimal action
-        print(optimal_action)
+        # Process each test instance and print to stdout
+        for instance in instances:
+            # Parse hand string to binary representation
+            hand = parse_hand_string(instance)
+            
+            # Convert hand to state ID
+            state_id = states_to_id[Hand(list(hand))]
+            
+            # Get optimal action
+            optimal_action = policy[state_id]
+            
+            # Print optimal action
+            print(optimal_action)
 
 if __name__ == "__main__":
     main()

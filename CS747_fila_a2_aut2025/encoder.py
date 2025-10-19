@@ -2,6 +2,7 @@ import argparse
 import sys
 import os
 import numpy as np
+import pickle
 
 class Hand:
     def __init__(self, hand):
@@ -163,6 +164,32 @@ class MDP:
         # update the last few entries in the out string
         if self.verbose:
             print("mdptype episodic\ndiscount  0.99999999999999")
+
+        # save states_to_id and id_to_states in pkl file
+        self.save_state_mappings()
+
+    def save_state_mappings(self, filename='state_mappings.pkl'):
+        """
+        Save states_to_id and id_to_states mappings to a pickle file.
+        
+        Args:
+            filename (str): Name of the pickle file to save
+        """
+        try:
+            state_data = {
+                'states_to_id': self.states_to_id,
+                'id_to_states': self.id_to_states,
+                'threshold': self.threshold,
+                'bonus': self.bonus,
+                'sequence': self.sequence,
+                'num_states': self.num_states
+            }
+            
+            with open(filename, 'wb') as f:
+                pickle.dump(state_data, f)
+        
+        except IOError as e:
+            print(f"Error saving state mappings: {e}", file=sys.stderr)
 
     def create_hands(self, cur_hand, cur_card_id):
         # Base case: if all cards have been considered
