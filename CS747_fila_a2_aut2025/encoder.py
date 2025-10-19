@@ -162,7 +162,7 @@ class MDP:
 
         # update the last few entries in the out string
         if self.verbose:
-            print("mdptype episodic\ndiscount  0.9")
+            print("mdptype episodic\ndiscount  0.99999999999999")
 
     def create_hands(self, cur_hand, cur_card_id):
         # Base case: if all cards have been considered

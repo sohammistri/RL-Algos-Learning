@@ -421,7 +421,7 @@ def get_optimal_value_policy_sparse(mdp_data, v):
 
     return np.array(optimal_values), np.array(optimal_policy)
 
-def solve_mdp_vi_sparse(mdp_data, tolerance=1e-8, verbose=False):
+def solve_mdp_vi_sparse(mdp_data, tolerance=1.0, verbose=False):
     """
     Solve MDP using Value Iteration for sparse MDPs.
     
@@ -441,11 +441,12 @@ def solve_mdp_vi_sparse(mdp_data, tolerance=1e-8, verbose=False):
         cur_v, policy = get_optimal_value_policy_sparse(mdp_data, v)
 
         # Check for convergence of value function
-        if np.linalg.norm(v - cur_v) < tolerance:
+        if np.max(np.abs(v - cur_v)) < tolerance:
             optimal_values = cur_v.copy()
             optimal_policy = policy.copy()
             break
         else:
+            # print(np.max(np.abs(v - cur_v)))
             v = cur_v.copy()
 
     if verbose:
