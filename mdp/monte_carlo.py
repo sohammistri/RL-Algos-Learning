@@ -3,53 +3,50 @@ import numpy as np
 
 from sample_episodic_mdps import EpisodicMDP
 
-def evaluate_policy(mdp, policy, episodes, V_pi, mc_type, mean_type, alpha, verbose):
-    state_visit_cnt = np.zeros(mdp.num_states)
+def evaluate_policy(mdp, policy, episodes, mc_type="every", mean_type="mean", alpha=None, verbose=False):
+    """Monte Carlo policy evaluation for episodic MDP."""
+    num_states = mdp.num_states
+    V_pi = np.zeros(num_states)
+    state_visit_cnt = np.zeros(num_states)
 
-    # check if mean_type is mean or weighted, if weighted, check if alpha exists.
-    if mean_type == " weighted":
-        try:
-            assert alpha is not None
-        except:
-            raise("Weighted mean not possible without weight alpha")
+    if mean_type == "weighted" and alpha is None:
+        raise ValueError("Weighted mean requires alpha")
+
+    gamma = mdp.discount
 
     for episode in episodes:
-        G = 0
-        if mc_type == "first":
-            # mantain where state was first visited
-            state_visit_id = np.zeros(mdp.num_states) - 1 # idxes made -1
-            for i, t in enumerate(episode):
-                s, _, _ = t
-                s = int(s)
-                if state_visit_id[s] == -1:
-                    state_visit_id[s] = len(episode) - 1 - i
+        # Compute returns from end to start
+        G = 0.0
+        returns = np.zeros(len(episode))
+        for i in reversed(range(len(episode))):
+            s, a, r = episode[i]
+            G = gamma * G + r
+            returns[i] = G
 
-        # next evaluate
-        for i, t in enumerate(episode[::-1]):
-            s, a, r = t
-            s, a, r = int(s), int(a), float(r)
-            G = mdp.discount * G + r
-            # print(s, a, r, G)
-            if mc_type == "every":
+        # First-visit bookkeeping
+        first_visit_idx = {}
+        if mc_type == "first":
+            for t, (s, _, _) in enumerate(episode):
+                s = int(s)
+                if s not in first_visit_idx:
+                    first_visit_idx[s] = t
+
+        # Update values
+        for t, (s, a, r) in enumerate(episode):
+            s = int(s)
+            if mc_type == "every" or (mc_type == "first" and first_visit_idx[s] == t):
                 state_visit_cnt[s] += 1
                 if mean_type == "mean":
-                    V_pi[s] += ((1 / state_visit_cnt[s]) * (G - V_pi[s]))
-                else:
-                    V_pi[s] += (alpha * (G - V_pi[s]))
-            elif mc_type == "first" and i == state_visit_id[s]:
-                state_visit_cnt[s] += 1
-                if mean_type == "mean":
-                    V_pi[s] += ((1 / state_visit_cnt[s]) * (G - V_pi[s]))
-                else:
-                    V_pi[s] += (alpha * (G - V_pi[s]))
-                
+                    V_pi[s] += (1 / state_visit_cnt[s]) * (returns[t] - V_pi[s])
+                else:  # weighted
+                    V_pi[s] += alpha * (returns[t] - V_pi[s])
 
     if verbose:
-        v_pi_list = V_pi.tolist()
-        for v, a in zip(v_pi_list, policy):
-            print(f"{v:.6f}", a)
+        print("\nEstimated State Values (V_pi):")
+        for s, v in enumerate(V_pi):
+            print(f"{v:.6f} {policy[s]}")
 
-
+    return V_pi
 
 def main():
     parser = argparse.ArgumentParser(description='Sample episodes from an episodic MDP')
@@ -81,7 +78,7 @@ def main():
         try:
             assert args.policy is not None
         except:
-            raise("Cannot evaluate a policy not provided")
+            raise ValueError("Cannot evaluate a policy not provided")
         
         # Load policy
         policy = mdp.load_policy(args.policy)
@@ -90,8 +87,7 @@ def main():
         episodes = mdp.sample_multiple_episodes(args.episodes, policy, args.max_steps)
 
         # create value functions
-        V_pi = np.zeros(mdp.num_states, dtype=float)
-        evaluate_policy(mdp, policy, episodes, V_pi, args.mc_type, args.mean_type, args.alpha, args.verbose)
+        V_pi = evaluate_policy(mdp, policy, episodes, args.mc_type, args.mean_type, args.alpha, args.verbose)
     
 
 if __name__ == "__main__":
