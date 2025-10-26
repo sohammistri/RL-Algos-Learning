@@ -1,0 +1,8 @@
+fonttools==4.60.1
+kiwisolver==1.4.9
+numpy==2.3.2
+packaging==25.0
+pillow==12.0.0
+pygame==2.6.1
+pyparsing==3.2.5
+six==1.17.0
