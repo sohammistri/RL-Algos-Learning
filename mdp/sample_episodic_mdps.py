@@ -95,7 +95,7 @@ class EpisodicMDP:
         Sample a single episode from the MDP.
         
         Args:
-            policy: a list of length num_states and values between 0 and num_actions - 1
+            policy: a np array of shape (num_states, num_actions) where we have the probability dist of taking action a from state s
             max_steps: Maximum number of steps before terminating
             
         Returns:
@@ -105,7 +105,7 @@ class EpisodicMDP:
 
         # Step 1: Sample a random state from 0 to num_states - 1 and get action
         current_state = np.random.randint(0, self.num_states)
-        current_action = policy[current_state]
+        current_action = np.random.choice(self.num_actions, p=policy[current_state, :])
 
         # Step 2: Loop until terminal
         step_cnt = 0
@@ -118,7 +118,7 @@ class EpisodicMDP:
                 break
             else:
                 current_state = next_state
-                current_action = policy[next_state]
+                current_action = np.random.choice(self.num_actions, p=policy[next_state, :])
                 step_cnt += 1
         
         return episode
@@ -170,14 +170,14 @@ class EpisodicMDP:
         Returns:
             policy: List of actions for each state
         """
-        policy = []
+        policy = np.zeros((self.num_states, self.num_actions))
         with open(policy_path, 'r') as f:
             lines = f.readlines()
-            for line in lines:
+            for state, line in enumerate(lines):
                 line = line.strip()
                 if line:
                     action = int(line)
-                    policy.append(action)
+                    policy[state][action] = 1.0
         return policy
     
 

@@ -5,6 +5,9 @@ from sample_episodic_mdps import EpisodicMDP
 
 def evaluate_policy(mdp, policy, episodes, mc_type="every", mean_type="mean", alpha=None, verbose=False):
     """Monte Carlo policy evaluation for episodic MDP."""
+    # Assert policy sums to 1.0 across all rows
+    assert np.allclose(policy.sum(axis=1), 1.0), "Policy rows must sum to 1.0"
+    
     num_states = mdp.num_states
     V_pi = np.zeros(num_states)
     state_visit_cnt = np.zeros(num_states)
@@ -42,18 +45,66 @@ def evaluate_policy(mdp, policy, episodes, mc_type="every", mean_type="mean", al
                     V_pi[s] += alpha * (returns[t] - V_pi[s])
 
     if verbose:
-        print("\nEstimated State Values (V_pi):")
+        # print("\nEstimated State Values (V_pi):")
         for s, v in enumerate(V_pi):
-            print(f"{v:.6f} {policy[s]}")
+            print(f"{v:.6f} {np.argmax(policy[s])}")
 
     return V_pi
+
+def on_policy_monte_carlo_ctrl(mdp, num_episodes, max_steps, epsilon_min=0.01, verbose=False):
+    """
+    Monte Carlo Control using ɛ-greedy policy improvement (on-policy)
+    """
+
+    # Step 1: Initialise Q table and random policy
+    num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
+    Q_values = np.full((num_states, num_actions), -np.inf)
+    policy = np.full((num_states, num_actions), 1 / num_actions)
+    assert np.allclose(policy.sum(axis=1), 1.0), "Policy rows must sum to 1.0"
+    
+    state_action_visit_cnt = np.zeros((num_states, num_actions))    # Step 2: Loop for some steps
+    for k in range(num_episodes):
+        # Step 2.1: sample one episode from this MDP as per policy
+        episode = mdp.sample_episode(policy, max_steps)
+
+        # Step 2.2: update Q values
+        G = 0.0
+        for i in reversed(range(len(episode))):
+            s, a, r = episode[i]
+            G = gamma * G + r
+            state_action_visit_cnt[s][a] += 1
+            if Q_values[s][a] == -np.inf:
+                Q_values[s][a] = 0
+            Q_values[s][a] += ((1 / state_action_visit_cnt[s][a]) * (G - Q_values[s][a]))
+
+        # Step 2.3: Update policy
+        epsilon = max(epsilon_min, 1 / (k + 1))
+        # epsilon = 1
+        for s in range(num_states):
+            greedy_action = np.argmax(Q_values[s])
+            policy[s] = np.full(num_actions, epsilon / num_actions)
+            policy[s][greedy_action] += (1 - epsilon)
+        
+        # Assert policy sums to 1.0 across all rows after update
+        assert np.allclose(policy.sum(axis=1), 1.0), "Policy rows must sum to 1.0"
+
+    optimal_policy = [np.argmax(Q_values[s]) for s in range(num_states)]
+    if verbose:
+        for s, a in enumerate(optimal_policy):
+            v = Q_values[s][a]
+            print(f"{v:.6f} {a}")
+
+        # print(Q_values)
+
+    return optimal_policy
+
 
 def main():
     parser = argparse.ArgumentParser(description='Sample episodes from an episodic MDP')
     parser.add_argument('--mode', type=str, required=True, help='Mode to run MC algorithm (eval or ctrl)', choices=['eval', 'ctrl'], default='ctrl')
     parser.add_argument('--mdp', type=str, required=True, help='Path to MDP file')
     parser.add_argument('--policy', type=str, default=None, help='Path to policy file (optional)')
-    parser.add_argument('--episodes', type=int, default=10, help='Number of episodes to sample')
+    parser.add_argument('--num_episodes', type=int, default=10, help='Number of episodes to sample')
     parser.add_argument('--max_steps', type=int, default=1000, help='Maximum steps per episode')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--mean_type', type=str, choices=['mean', 'weighted'], default='mean', help='Type of mean to use (mean or weighted)')
@@ -84,10 +135,14 @@ def main():
         policy = mdp.load_policy(args.policy)
 
         # Sample episodes
-        episodes = mdp.sample_multiple_episodes(args.episodes, policy, args.max_steps)
+        episodes = mdp.sample_multiple_episodes(args.num_episodes, policy, args.max_steps)
 
         # create value functions
         V_pi = evaluate_policy(mdp, policy, episodes, args.mc_type, args.mean_type, args.alpha, args.verbose)
+    # Next ctrl
+    elif args.mode == "ctrl":
+        # solve mdp
+        optimal_policy = on_policy_monte_carlo_ctrl(mdp, args.num_episodes, args.max_steps, verbose=args.verbose)
     
 
 if __name__ == "__main__":
