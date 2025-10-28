@@ -26,3 +26,6 @@ Implement multiple solvers for MDPs staring from model-based (Dynamic Programmin
             - *Fixed*: inf_norm 0.073291
             - *Adagrad*: inf_norm 0.009131
             - *RmsProp (beta 0.99)*: inf_norm 0.082586
+    - Implement On-policy TD(0) Policy Optimization (SARSA):
+    - **Running Notes**:
+        - Fixed alphas are working better, larger alphas for larger MDPs

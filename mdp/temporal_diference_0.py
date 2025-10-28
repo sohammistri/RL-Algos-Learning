@@ -1,6 +1,8 @@
 import argparse
+from multiprocessing import Value
 from typing import Optional
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sample_episodic_mdps import MDP
 
@@ -27,8 +29,7 @@ def td0_policy_evaluation(
     # Accept either deterministic (shape: [num_states], entries are action indices)
     # or stochastic (shape: [num_states, num_actions]) policies.
     if policy is None:
-        # fallback: uniform random policy
-        policy_dist = np.full((num_states, num_actions), 1.0 / num_actions, dtype=float)
+        raise ValueError("Policy needs to be provided in order to be evaluated")
     else:
         policy_arr = np.asarray(policy)
         if policy_arr.ndim == 1:
@@ -42,13 +43,11 @@ def td0_policy_evaluation(
         else:
             raise ValueError("Policy must be 1D (actions) or 2D (distributions).")
 
-    # Validate/repair policy rows so each sums to 1.0; if a row is all zeros, use uniform.
-    row_sums = policy_dist.sum(axis=1, keepdims=True)
+    # Validate that policy rows sum to 1.0
+    row_sums = policy_dist.sum(axis=1)
     for s in range(num_states):
-        if not np.isfinite(row_sums[s, 0]) or row_sums[s, 0] <= 0:
-            policy_dist[s, :] = 1.0 / num_actions
-        else:
-            policy_dist[s, :] = policy_dist[s, :] / row_sums[s, 0]
+        if not np.isclose(row_sums[s], 1.0):
+            raise ValueError(f"Policy row for state {s} does not sum to 1.0 (sum: {row_sums[s]})")
 
     terminal_states = set(mdp.terminal_states)
 
@@ -66,11 +65,7 @@ def td0_policy_evaluation(
         probs = mdp.P[s1, a1, :].astype(float, copy=False)
         prob_sum = probs.sum()
         if not np.isclose(prob_sum, 1.0):
-            if prob_sum > 0:
-                probs = probs / prob_sum
-            else:
-                # fallback: uniform over states if transition row is invalid
-                probs = np.full(num_states, 1.0 / num_states, dtype=float)
+            raise ValueError("MDP is not correct, probs don't add to 1.0")
 
         s2 = int(rng.choice(num_states, p=probs))
         r1 = float(mdp.R[s1, a1, s2])
@@ -92,7 +87,154 @@ def td0_policy_evaluation(
 
     return values
 
+def on_policy_td0_control_sarsa_worker(
+    mdp: MDP,
+    num_iters: int = 10,
+    alpha: float = 0.1,
+    lr: str = "fixed",
+    beta: float = 0.99,
+    epsilon_min: float = 0.01,
+    seed: int = None
+):
+    """
+    On-policy SARSA algorithm for optimial policy on an MDP.
+    """
+    rng = np.random.default_rng(seed)
+    num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
+    terminal_states = set(mdp.terminal_states)
 
+    Q_values = np.zeros((num_states, num_actions), dtype=float)
+    # Per-state-action accumulators for adaptive step sizes
+    adagrad_accum = np.zeros((num_states, num_actions), dtype=float)
+    rmsprop_accum = np.zeros((num_states, num_actions), dtype=float)
+
+
+    for k in range(num_iters):
+        # Generate epsilon greedy policy
+        epsilon = max(epsilon_min, 1 / (k + 1))
+        a_star = np.argmax(Q_values, axis=1) # get greedy actions per state, shape (num_states)
+        policy = np.full((num_states, num_actions), epsilon / num_actions)
+        policy[np.arange(num_states), a_star] += (1 - epsilon)
+
+        # Validate policy
+        row_sums = policy.sum(axis=1)
+        for s in range(num_states):
+            if not np.isclose(row_sums[s], 1.0):
+                raise ValueError(f"Policy row for state {s} does not sum to 1.0 (sum: {row_sums[s]})")
+
+        # Sample from this
+        while True:
+            s1 = int(rng.integers(0, num_states))
+            if s1 not in terminal_states:
+                break
+        
+        a1 = int(rng.choice(num_actions, p=policy[s1, :]))
+
+        probs = mdp.P[s1, a1, :].astype(float, copy=False)
+        prob_sum = probs.sum()
+        if not np.isclose(prob_sum, 1.0):
+            raise ValueError("MDP is not correct, probs don't add to 1.0")
+
+        s2 = int(rng.choice(num_states, p=probs))
+        r1 = float(mdp.R[s1, a1, s2])
+        a2 = int(rng.choice(num_actions, p=policy[s2, :]))
+
+        # Update Q-table
+        td_error = r1 + gamma * Q_values[s2][a2] - Q_values[s1][a1]
+
+        # Learning rate schedule
+        if lr == "fixed":
+            alpha_updated = alpha
+        elif lr == "adagrad":
+            adagrad_accum[s1][a1] += td_error * td_error
+            alpha_updated = alpha / np.sqrt(adagrad_accum[s1][a1] + 1e-8)
+        elif lr == "rmsprop":
+            rmsprop_accum[s1][a1] = beta * rmsprop_accum[s1][a1] + (1.0 - beta) * (td_error * td_error)
+            alpha_updated = alpha / np.sqrt(rmsprop_accum[s1][a1] + 1e-8)
+        else:
+            raise ValueError("Unknown lr mode. Use one of: fixed, adagrad, rmsprop.")
+
+        Q_values[s1][a1] = Q_values[s1][a1] + alpha_updated * td_error
+
+    # Get the optimal policy and state value functions
+    optimal_policy = np.argmax(Q_values, axis=1)
+    optimal_values = np.max(Q_values, axis=1)
+    return optimal_values, optimal_policy
+
+def on_policy_td0_control_sarsa(
+    mdp: MDP,
+    num_iters: int = 10,
+    alpha: float = 0.1,
+    lr: str = "fixed",
+    beta: float = 0.99,
+    epsilon_min: float = 0.01,
+    num_workers: int = 16,
+    seed: int = None
+):
+    """
+    Multithreaded on-policy SARSA algorithm for optimal policy on an MDP.
+    Runs multiple workers in parallel with different seeds, then aggregates results.
+    """
+    num_states, num_actions = mdp.num_states, mdp.num_actions
+    
+    # Run workers in parallel
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for i in range(num_workers):
+            worker_seed = seed + i if seed is not None else None
+            future = executor.submit(
+                on_policy_td0_control_sarsa_worker,
+                mdp,
+                num_iters,
+                alpha,
+                lr,
+                beta,
+                epsilon_min,
+                worker_seed
+            )
+            futures.append(future)
+        
+        # Collect results from all workers
+        all_optimal_values = []
+        all_optimal_policies = []
+        for future in as_completed(futures):
+            optimal_values, optimal_policy = future.result()
+            all_optimal_values.append(optimal_values)
+            all_optimal_policies.append(optimal_policy)
+    
+    # Aggregate policies: for each state, take the most occurring action
+    # Break ties by choosing the action with larger average Q-values
+    aggregated_policy = np.zeros(num_states, dtype=int)
+    
+    for s in range(num_states):
+        # Count occurrences of each action
+        action_counts = {}
+        action_values = {}
+        
+        for worker_policy, worker_values in zip(all_optimal_policies, all_optimal_values):
+            action = int(worker_policy[s])
+            if action not in action_counts:
+                action_counts[action] = 0
+                action_values[action] = []
+            action_counts[action] += 1
+            action_values[action].append(worker_values[s])
+        
+        # Find actions with maximum count
+        max_count = max(action_counts.values())
+        max_actions = [a for a, count in action_counts.items() if count == max_count]
+        
+        # If tie, break by choosing action with larger average value
+        if len(max_actions) == 1:
+            aggregated_policy[s] = max_actions[0]
+        else:
+            # Calculate average values for tied actions
+            avg_values = {a: np.mean(action_values[a]) for a in max_actions}
+            aggregated_policy[s] = max(max_actions, key=lambda a: avg_values[a])
+    
+    # For values, take the average across all workers
+    aggregated_values = np.mean(all_optimal_values, axis=0)
+    
+    return aggregated_values, aggregated_policy
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TD(0) boilerplate for MDPs")
@@ -100,11 +242,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mdp", type=str, required=True, help="Path to MDP file")
     parser.add_argument('--policy', type=str, default=None, help='Path to policy file (optional)')
     parser.add_argument('--eval-sol', type=str, default=None, help='Path to true value-action solution file for infinity-norm evaluation')
+    parser.add_argument('--ctrl-sol', type=str, default=None, help='Path to true value-policy solution file for infinity-norm evaluation in control mode')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument("--num_iters", type=int, default=10, help="Number of episodes to run")
     parser.add_argument("--alpha", type=float, default=0.1, help="TD(0) learning rate alpha")
     parser.add_argument("--lr", type=str, choices=["fixed", "adagrad", "rmsprop"], default="fixed", help="Learning rate schedule")
     parser.add_argument("--beta", type=float, default=0.99, help="Beta for RMSProp accumulator")
+    parser.add_argument("--epsilon-min", type=float, default=0.01, help="Minimum epsilon for exploration")
+    parser.add_argument("--num-workers", type=int, default=16, help="Number of parallel workers for SARSA control")
     parser.add_argument("--verbose", action="store_true", default=True, help="Show verbose output (default: True)")
     parser.add_argument("--no-verbose", dest="verbose", action="store_false", help="Disable verbose output")
     return parser
@@ -128,10 +273,7 @@ def main():
         policy = mdp.load_policy(args.policy)
         # Basic sanity: ensure policy rows form distributions
         if not np.allclose(policy.sum(axis=1), 1.0):
-            # normalize defensively
-            row_sums = policy.sum(axis=1, keepdims=True)
-            row_sums[row_sums == 0] = 1.0
-            policy = policy / row_sums
+            raise ValueError("Not a valid policy provided")
 
         # Solve the policy
         value_functions = td0_policy_evaluation(
@@ -165,7 +307,48 @@ def main():
             for s, v in enumerate(value_functions):
                 print(f"{v:.6f} {np.argmax(policy[s])}")
     elif args.mode == "ctrl":
-        pass
+        optimal_values, optimal_policy = on_policy_td0_control_sarsa_worker(
+            mdp,
+            args.num_iters,
+            args.alpha,
+            args.lr,
+            args.beta,
+            args.epsilon_min,
+            # args.num_workers,
+            args.seed,
+        )
+
+        # Optional: evaluate infinity norm vs provided solution file
+        if args.ctrl_sol:
+            true_vals = []
+            true_policy = []
+            with open(args.ctrl_sol, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    # Expect: value policy
+                    true_vals.append(float(parts[0]))
+                    true_policy.append(int(parts[1]))
+            true_vals = np.asarray(true_vals, dtype=float)
+            true_policy = np.asarray(true_policy, dtype=int)
+            
+            # Compare value functions
+            val_diff = np.abs(optimal_values - true_vals)
+            val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
+            print(f"value_inf_norm {val_inf_norm:.6f}")
+            
+            # Compare policies (check if any actions differ)
+            policy_matches = np.array_equal(optimal_policy, true_policy)
+            if policy_matches:
+                print("policy_match True")
+            else:
+                print("policy_match False")
+
+        if args.verbose:
+            for v, a in zip(optimal_values, optimal_policy):
+                print(f"{v:.6f} {a}")
 
 if __name__ == "__main__":
     main()

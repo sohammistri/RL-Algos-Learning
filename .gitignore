@@ -208,3 +208,4 @@ __marimo__/
 cs747_env
 data
 .DS_Store
+logs
