@@ -3,7 +3,7 @@ import numpy as np
 import sys
 import json
 
-class EpisodicMDP:
+class MDP:
     """Class to represent and sample from an episodic MDP."""
     
     def __init__(self, mdp_path):
@@ -239,7 +239,7 @@ def main():
     np.random.seed(args.seed)
     
     # Load MDP
-    mdp = EpisodicMDP(args.mdp)
+    mdp = MDP(args.mdp)
     
     # Load or create policy
     if args.policy:
