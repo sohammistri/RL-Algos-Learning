@@ -123,6 +123,49 @@ class EpisodicMDP:
         
         return episode
     
+    def sample_episode_thread_safe(self, policy, max_steps=1000, rng=None,):
+        """
+        Sample a single episode from the MDP using a provided numpy.random.Generator.
+
+        Args:
+            policy: np.ndarray, shape (num_states, num_actions) - action distribution per state
+            max_steps: int, maximum transitions
+            rng: np.random.Generator or None (if None, a new Generator will be used)
+
+        Returns:
+            episode: list of (state, action, reward) tuples
+        """
+        if rng is None:
+            rng = np.random.default_rng()
+
+        # optional: ensure terminal_states is a set for O(1) membership
+        terminal_states = self.terminal_states if isinstance(self.terminal_states, set) else set(self.terminal_states)
+
+        # choose initial state
+        current_state = int(rng.integers(0, self.num_states))
+        # sample initial action from policy (assumes row sums to 1 for available states)
+        current_action = int(rng.choice(self.num_actions, p=policy[current_state, :]))
+
+        episode = []
+
+        # do at most max_steps transitions
+        for step in range(max_steps):
+            # choose next state according to transition distribution
+            probs = self.P[current_state, current_action, :]
+            next_state = int(rng.choice(self.num_states, p=probs))
+            reward = float(self.R[current_state, current_action, next_state])
+            episode.append((current_state, current_action, reward))
+
+            if next_state in terminal_states:
+                break
+
+            # move on
+            current_state = next_state
+            current_action = int(rng.choice(self.num_actions, p=policy[next_state, :]))
+
+        return episode
+
+    
     def sample_multiple_episodes(self, num_episodes, policy, max_steps=1000):
         """
         Sample multiple episodes from the MDP.
