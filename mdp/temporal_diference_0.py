@@ -2,10 +2,10 @@ import argparse
 from multiprocessing import Value
 from typing import Optional
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
+from concurrent.futures import ProcessPoolExecutor, as_completed # <-- Change this
+import numba
 from sample_episodic_mdps import MDP
-
+from tqdm import tqdm, trange
 
 def td0_policy_evaluation(
     mdp: MDP,
@@ -51,7 +51,7 @@ def td0_policy_evaluation(
 
     terminal_states = set(mdp.terminal_states)
 
-    for _ in range(num_iters):
+    for _ in trange(num_iters, desc="TD(0) Evaluation"):
         # Sample a non-terminal state to avoid degenerate self-loops
         # If all states are terminal (degenerate MDP), break.
         if len(terminal_states) == num_states:
@@ -87,78 +87,69 @@ def td0_policy_evaluation(
 
     return values
 
-def on_policy_td0_control_sarsa_worker(
-    mdp: MDP,
+@numba.jit(nopython=True) # Add this decorator
+def on_policy_td0_control_sarsa_worker_numba(
+    # NOTE: Numba works best with simple types.
+    # The MDP object would need to be refactored to pass its underlying
+    # NumPy arrays (P, R) and scalar values (num_states, etc.) directly.
+    P,
+    R,
+    num_states,
+    num_actions,
+    gamma,
+    terminal_states,
     num_iters: int = 10,
     alpha: float = 0.1,
-    lr: str = "fixed",
-    beta: float = 0.99,
+    # For simplicity, this example only shows the 'fixed' lr.
+    # Supporting dynamic strings like 'rmsprop' requires more advanced Numba usage.
+    # lr: str = "fixed",
+    # beta: float = 0.99,
     epsilon_min: float = 0.01,
     seed: int = None
 ):
     """
-    On-policy SARSA algorithm for optimial policy on an MDP.
+    Numba-compatible JIT compiled version of the SARSA worker.
     """
-    rng = np.random.default_rng(seed)
-    num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
-    terminal_states = set(mdp.terminal_states)
+    # Numba requires the random number generator to be initialized inside the function.
+    if seed is not None:
+        np.random.seed(seed)
 
-    Q_values = np.zeros((num_states, num_actions), dtype=float)
-    # Per-state-action accumulators for adaptive step sizes
-    adagrad_accum = np.zeros((num_states, num_actions), dtype=float)
-    rmsprop_accum = np.zeros((num_states, num_actions), dtype=float)
-
+    Q_values = np.zeros((num_states, num_actions), dtype=np.float64)
 
     for k in range(num_iters):
-        # Generate epsilon greedy policy
         epsilon = max(epsilon_min, 1 / (k + 1))
-        a_star = np.argmax(Q_values, axis=1) # get greedy actions per state, shape (num_states)
+        a_star = np.argmax(Q_values, axis=1)
+        
+        # Epsilon-greedy policy generation
         policy = np.full((num_states, num_actions), epsilon / num_actions)
-        policy[np.arange(num_states), a_star] += (1 - epsilon)
+        for s in range(num_states): # Numba is good at optimizing loops
+            policy[s, a_star[s]] += (1 - epsilon)
 
-        # Validate policy
-        row_sums = policy.sum(axis=1)
-        for s in range(num_states):
-            if not np.isclose(row_sums[s], 1.0):
-                raise ValueError(f"Policy row for state {s} does not sum to 1.0 (sum: {row_sums[s]})")
-
-        # Sample from this
+        # Sample initial state
         while True:
-            s1 = int(rng.integers(0, num_states))
+            s1 = np.random.randint(0, num_states)
+            # Numba works with NumPy arrays for checking membership
             if s1 not in terminal_states:
                 break
-        
-        a1 = int(rng.choice(num_actions, p=policy[s1, :]))
 
-        probs = mdp.P[s1, a1, :].astype(float, copy=False)
-        prob_sum = probs.sum()
-        if not np.isclose(prob_sum, 1.0):
-            raise ValueError("MDP is not correct, probs don't add to 1.0")
+        a1 = np.searchsorted(np.cumsum(policy[s1, :]), np.random.rand())
 
-        s2 = int(rng.choice(num_states, p=probs))
-        r1 = float(mdp.R[s1, a1, s2])
-        a2 = int(rng.choice(num_actions, p=policy[s2, :]))
+        probs = P[s1, a1, :]
+        s2 = np.searchsorted(np.cumsum(probs), np.random.rand())
+        r1 = R[s1, a1, s2]
 
-        # Update Q-table
-        td_error = r1 + gamma * Q_values[s2][a2] - Q_values[s1][a1]
+        a2 = np.searchsorted(np.cumsum(policy[s2, :]), np.random.rand())
 
-        # Learning rate schedule
-        if lr == "fixed":
-            alpha_updated = alpha
-        elif lr == "adagrad":
-            adagrad_accum[s1][a1] += td_error * td_error
-            alpha_updated = alpha / np.sqrt(adagrad_accum[s1][a1] + 1e-8)
-        elif lr == "rmsprop":
-            rmsprop_accum[s1][a1] = beta * rmsprop_accum[s1][a1] + (1.0 - beta) * (td_error * td_error)
-            alpha_updated = alpha / np.sqrt(rmsprop_accum[s1][a1] + 1e-8)
-        else:
-            raise ValueError("Unknown lr mode. Use one of: fixed, adagrad, rmsprop.")
+        td_error = r1 + gamma * Q_values[s2, a2] - Q_values[s1, a1]
+        Q_values[s1, a1] += alpha * td_error
 
-        Q_values[s1][a1] = Q_values[s1][a1] + alpha_updated * td_error
-
-    # Get the optimal policy and state value functions
     optimal_policy = np.argmax(Q_values, axis=1)
-    optimal_values = np.max(Q_values, axis=1)
+    
+    # Manually compute the max along axis=1
+    optimal_values = np.zeros(num_states, dtype=np.float64)
+    for s in range(num_states):
+        optimal_values[s] = np.max(Q_values[s, :])
+    
     return optimal_values, optimal_policy
 
 def on_policy_td0_control_sarsa(
@@ -175,20 +166,25 @@ def on_policy_td0_control_sarsa(
     Multithreaded on-policy SARSA algorithm for optimal policy on an MDP.
     Runs multiple workers in parallel with different seeds, then aggregates results.
     """
-    num_states, num_actions = mdp.num_states, mdp.num_actions
+    num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
+    P, R = mdp.P.copy(), mdp.R.copy()
+    terminal_states = np.array(mdp.terminal_states)
     
     # Run workers in parallel
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = []
         for i in range(num_workers):
             worker_seed = seed + i if seed is not None else None
             future = executor.submit(
-                on_policy_td0_control_sarsa_worker,
-                mdp,
+                on_policy_td0_control_sarsa_worker_numba,
+                P,
+                R,
+                num_states,
+                num_actions,
+                gamma,
+                terminal_states,
                 num_iters,
                 alpha,
-                lr,
-                beta,
                 epsilon_min,
                 worker_seed
             )
@@ -197,7 +193,7 @@ def on_policy_td0_control_sarsa(
         # Collect results from all workers
         all_optimal_values = []
         all_optimal_policies = []
-        for future in as_completed(futures):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="SARSA workers", unit="worker"):
             optimal_values, optimal_policy = future.result()
             all_optimal_values.append(optimal_values)
             all_optimal_policies.append(optimal_policy)
@@ -307,14 +303,14 @@ def main():
             for s, v in enumerate(value_functions):
                 print(f"{v:.6f} {np.argmax(policy[s])}")
     elif args.mode == "ctrl":
-        optimal_values, optimal_policy = on_policy_td0_control_sarsa_worker(
+        optimal_values, optimal_policy = on_policy_td0_control_sarsa(
             mdp,
             args.num_iters,
             args.alpha,
             args.lr,
             args.beta,
             args.epsilon_min,
-            # args.num_workers,
+            args.num_workers,
             args.seed,
         )
 
