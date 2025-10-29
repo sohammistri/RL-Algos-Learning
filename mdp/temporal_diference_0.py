@@ -245,7 +245,6 @@ def on_policy_td0_control_sarsa_exploring_starts(
     mean_Q_values = np.mean(np.stack(all_Q_values), axis=0)
     return aggregated_values, aggregated_policy, mean_Q_values
 
-
 @numba.jit(nopython=True) # Add this decorator
 def on_policy_td0_control_sarsa_epsilon_greedy_numba_worker(
     P,
@@ -261,67 +260,55 @@ def on_policy_td0_control_sarsa_epsilon_greedy_numba_worker(
     seed: int = None,
     true_vals: list = None
 ):
-    """
-    Numba-compatible JIT compiled version of the on policy SARSA epsilon greedy starts algorithm (worked code).
-    """
-    # Numba requires the random number generator to be initialized inside the function.
+    def select_action_epsilon_greedy(q_values, epsilon, num_actions):
+        """Selects an action using an epsilon-greedy policy."""
+        if np.random.rand() < epsilon:
+            return np.random.randint(num_actions)
+        else:
+            return np.argmax(q_values)
+
     if seed is not None:
         np.random.seed(seed)
 
     Q_values = np.zeros((num_states, num_actions), dtype=np.float64)
     td_error_history = np.zeros((num_states, num_actions), dtype=np.float64)
-    
+
     for k in range(num_iters):
-        # generate epsilon greedy policy
-        epsilon = max(epsilon_min, math.sqrt(1 / (k + 1)))
-        # print(epsilon)
-        policy = np.full((num_states, num_actions), epsilon / num_actions)
-        a_star = np.argmax(Q_values, axis = 1)
-        policy[np.arange(0, num_states)][a_star] += (1 - epsilon)
-        
-        # sample random state and epsiode
-        while True:
+        epsilon = max(epsilon_min, 1.0 / (k + 1))
+
+        # Start of an episode
+        s1 = np.random.randint(0, num_states)
+        while s1 in terminal_states:
             s1 = np.random.randint(0, num_states)
-            if s1 not in terminal_states:
-                a1 = np.searchsorted(np.cumsum(policy[s1]), np.random.rand())
-                break
+
+        a1 = select_action_epsilon_greedy(Q_values[s1], epsilon, num_actions)
 
         for i in range(max_steps):
+            # Transition to the next state
             probs = P[s1, a1, :]
             s2 = np.searchsorted(np.cumsum(probs), np.random.rand())
             r1 = R[s1, a1, s2]
-            a2 = np.searchsorted(np.cumsum(policy[s2]), np.random.rand())
+
+            # Choose the next action based on the current policy
+            a2 = select_action_epsilon_greedy(Q_values[s2], epsilon, num_actions)
 
             # SARSA update
-            td_error = r1 + gamma * Q_values[s2][a2] - Q_values[s1][a1]
-            td_error = max(-1, min(1, td_error)) # Clip error to be between -1 and 1
+            td_target = r1 + gamma * Q_values[s2, a2]
+            td_error = td_target - Q_values[s1, a1]
+            td_error_history[s1, a1] += (td_error ** 2)
+            Q_values[s1, a1] += (alpha / math.sqrt(td_error_history[s1, a1] + 1e-8)) * td_error
 
-            td_error_history[s1][a1] += (td_error ** 2)
-            # td_error_history[s1][a1] = 1.0
-            Q_values[s1][a1] = Q_values[s1][a1] + (alpha / (math.sqrt(td_error_history[s1][a1] + 1e-8))) * td_error
+            s1, a1 = s2, a2
 
-            # Policy update
-            a_star = np.argmax(Q_values[s1], axis=0)
-            policy[s1] = np.array([epsilon / num_actions for _ in range(num_actions)], dtype=np.float64).copy()
-            policy[s1][a_star] += (1 - epsilon)
-
-            if s2 in terminal_states:
+            if s1 in terminal_states:
                 break
-            else:
-                s1, a1 = s2, a2
         
         # if (k % 100 == 0) or (k == num_iters - 1):
-        #     # get inf norm with true_vals
-        #     optimal_policy = np.argmax(Q_values, axis=1)
-        
-        #     # Manually compute the max along axis=1
-        #     optimal_values = np.zeros(num_states, dtype=np.float64)
-        #     for s in range(num_states):
-        #         optimal_values[s] = np.max(Q_values[s, :])
-
-        #     val_diff = np.abs(optimal_values - true_vals)
-        #     val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
-        #     print(k, epsilon, val_inf_norm)
+        #     if true_vals is not None:
+        #         optimal_values = np.max(Q_values, axis=1)
+        #         val_diff = np.abs(optimal_values - true_vals)
+        #         val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
+        #         print(k, epsilon, val_inf_norm)
 
     optimal_policy = np.argmax(Q_values, axis=1)
     
@@ -329,7 +316,6 @@ def on_policy_td0_control_sarsa_epsilon_greedy_numba_worker(
     optimal_values = np.zeros(num_states, dtype=np.float64)
     for s in range(num_states):
         optimal_values[s] = np.max(Q_values[s, :])
-    
     return Q_values.copy(), optimal_values, optimal_policy
 
 def on_policy_td0_control_sarsa_epsilon_greedy(
@@ -420,11 +406,173 @@ def on_policy_td0_control_sarsa_epsilon_greedy(
     mean_Q_values = np.mean(np.stack(all_Q_values), axis=0)
     return aggregated_values, aggregated_policy, mean_Q_values
 
+@numba.jit(nopython=True) # Add this decorator
+def off_policy_td0_control_q_learning_epsilon_greedy_numba_worker(
+    P,
+    R,
+    num_states,
+    num_actions,
+    gamma,
+    terminal_states,
+    num_iters: int = 10,
+    max_steps: int = 1000,
+    alpha: float = 0.1,
+    epsilon_min: float = 0.01,
+    seed: int = None,
+    true_vals: list = None
+):
+    def select_action_epsilon_greedy(q_values, epsilon, num_actions):
+        """Selects an action using an epsilon-greedy policy."""
+        if np.random.rand() < epsilon:
+            return np.random.randint(num_actions)
+        else:
+            return np.argmax(q_values)
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    Q_values = np.zeros((num_states, num_actions), dtype=np.float64)
+    td_error_history = np.zeros((num_states, num_actions), dtype=np.float64)
+
+    for k in range(num_iters):
+        epsilon = max(epsilon_min, 1.0 / (k + 1))
+
+        # Start of an episode
+        s1 = np.random.randint(0, num_states)
+        while s1 in terminal_states:
+            s1 = np.random.randint(0, num_states)
+
+        a1 = select_action_epsilon_greedy(Q_values[s1], epsilon, num_actions)
+
+        for i in range(max_steps):
+            # Transition to the next state
+            probs = P[s1, a1, :]
+            s2 = np.searchsorted(np.cumsum(probs), np.random.rand())
+            r1 = R[s1, a1, s2]
+
+            # Q-Learning update
+            td_target = r1 + gamma * np.max(Q_values[s2, :])
+            td_error = td_target - Q_values[s1, a1]
+            td_error_history[s1, a1] += (td_error ** 2)
+            Q_values[s1, a1] += (alpha / math.sqrt(td_error_history[s1, a1] + 1e-8)) * td_error
+
+            # Choose the next action based on the current policy
+            a2 = select_action_epsilon_greedy(Q_values[s2], epsilon, num_actions)
+
+            s1, a1 = s2, a2
+
+            if s1 in terminal_states:
+                break
+        
+        # if (k % 100 == 0) or (k == num_iters - 1):
+        #     if true_vals is not None:
+        #         optimal_values = np.max(Q_values, axis=1)
+        #         val_diff = np.abs(optimal_values - true_vals)
+        #         val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
+        #         print(k, epsilon, val_inf_norm)
+
+    optimal_policy = np.argmax(Q_values, axis=1)
+    
+    # Manually compute the max along axis=1
+    optimal_values = np.zeros(num_states, dtype=np.float64)
+    for s in range(num_states):
+        optimal_values[s] = np.max(Q_values[s, :])
+    return Q_values.copy(), optimal_values, optimal_policy
+
+def off_policy_td0_control_q_learning_epsilon_greedy(
+    mdp: MDP,
+    num_iters: int = 10,
+    max_steps: int = 1000,
+    alpha: float = 0.1,
+    lr: str = "fixed",
+    beta: float = 0.99,
+    epsilon_min: float = 0.01,
+    num_workers: int = 16,
+    seed: int = None,
+    true_vals: list = None
+):
+    """
+    Multithreaded on-policy SARSA algorithm for optimal policy on an MDP.
+    Runs multiple workers in parallel with different seeds, then aggregates results.
+    """
+    num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
+    P, R = mdp.P.copy(), mdp.R.copy()
+    terminal_states = np.array(mdp.terminal_states)
+    
+    # Run workers in parallel
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for i in range(num_workers):
+            worker_seed = seed + i if seed is not None else None
+            future = executor.submit(
+                off_policy_td0_control_q_learning_epsilon_greedy_numba_worker,
+                P,
+                R,
+                num_states,
+                num_actions,
+                gamma,
+                terminal_states,
+                num_iters,
+                max_steps,
+                alpha,
+                epsilon_min,
+                worker_seed,
+                true_vals
+            )
+            futures.append(future)
+        
+        # Collect results from all workers
+        all_Q_values = []
+        all_optimal_values = []
+        all_optimal_policies = []
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Q-Learning workers", unit="worker"):
+            Q_values, optimal_values, optimal_policy = future.result()
+            all_Q_values.append(Q_values)
+            all_optimal_values.append(optimal_values)
+            all_optimal_policies.append(optimal_policy)
+    
+    # Aggregate policies: for each state, take the most occurring action
+    # Break ties by choosing the action with larger average Q-values
+    aggregated_policy = np.zeros(num_states, dtype=int)
+    aggregated_values = np.zeros(num_states, dtype=float)
+    
+    for s in range(num_states):
+        # Count occurrences of each action
+        action_counts = {}
+        action_values = {}
+        
+        for worker_policy, worker_values in zip(all_optimal_policies, all_optimal_values):
+            action = int(worker_policy[s])
+            if action not in action_counts:
+                action_counts[action] = 0
+                action_values[action] = []
+            action_counts[action] += 1
+            action_values[action].append(worker_values[s])
+        
+        # Find actions with maximum count
+        max_count = max(action_counts.values())
+        max_actions = [a for a, count in action_counts.items() if count == max_count]
+        
+        # If tie, break by choosing action with larger average value
+        if len(max_actions) == 1:
+            a_star = max_actions[0]
+        else:
+            # Calculate average values for tied actions
+            avg_values = {a: np.mean(action_values[a]) for a in max_actions}
+            a_star= max(max_actions, key=lambda a: avg_values[a])
+
+        aggregated_policy[s] = a_star
+        aggregated_values[s] = np.mean(action_values[a_star])
+
+    mean_Q_values = np.mean(np.stack(all_Q_values), axis=0)
+    return aggregated_values, aggregated_policy, mean_Q_values
+
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TD(0) boilerplate for MDPs")
     parser.add_argument('--mode', type=str, required=True, help='Mode to run MC algorithm (eval or ctrl)', choices=['eval', 'ctrl'], default='ctrl')
-    parser.add_argument('--ctrl-mode', type=str, help='Mode to run MC ctrl algorithm (exploring_starts or epsilon_greedy)', choices=['exploring_starts', 'epsilon_greedy'], default='exploring_starts')
+    parser.add_argument('--ctrl-mode', type=str, help='Mode to run MC ctrl algorithm (exploring_starts, epsilon_greedy_sarsa or epsilon_greedy_q_learning)', choices=['exploring_starts', 'epsilon_greedy_sarsa', 'epsilon_greedy_q_learning'], default='exploring_starts')
     parser.add_argument("--mdp", type=str, required=True, help="Path to MDP file")
     parser.add_argument('--policy', type=str, default=None, help='Path to policy file (optional)')
     parser.add_argument('--eval-sol', type=str, default=None, help='Path to true value-action solution file for infinity-norm evaluation')
@@ -524,8 +672,21 @@ def main():
                 true_vals
             )
         
-        elif args.ctrl_mode == "epsilon_greedy":
+        elif args.ctrl_mode == "epsilon_greedy_sarsa":
             optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_epsilon_greedy(
+                mdp,
+                args.num_iters,
+                args.max_steps,
+                args.alpha,
+                args.lr,
+                args.beta,
+                args.epsilon_min,
+                args.num_workers,
+                args.seed,
+                true_vals
+            )
+        elif args.ctrl_mode == "epsilon_greedy_q_learning":
+            optimal_values, optimal_policy, Q_values = off_policy_td0_control_q_learning_epsilon_greedy(
                 mdp,
                 args.num_iters,
                 args.max_steps,

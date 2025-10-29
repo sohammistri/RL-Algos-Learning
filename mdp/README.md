@@ -33,3 +33,8 @@ Implement multiple solvers for MDPs staring from model-based (Dynamic Programmin
             - Looks like a starting alpha of 1.0 is good enough to get good convergence.
             - For actions not matching with solution, Q values look close by the second decimal place.
             - We see good results upto second decimal place for exploring states.
+        - Second, move the *epsilon greedy SARSA*: policy updated using epsilon greedy, actions selected as same.
+            - `epsilon_min` is a **important** parameter to ensure proper exploration. Making it 0 diverges it a lot. But making it high like 0.10 is not really helpful to converge to good value functions
+            - Better estimation of optimal actions, lower no of mistakes than explore states.
+            - Still need a learning of learning rate using AdaGrad type updates.
+        - Third, we implement *off-policy epsilon greedy Q-learning*: Just change the update rule to Q-learning rule.
