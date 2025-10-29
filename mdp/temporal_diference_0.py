@@ -273,7 +273,7 @@ def on_policy_td0_control_sarsa_epsilon_greedy_numba_worker(
     
     for k in range(num_iters):
         # generate epsilon greedy policy
-        epsilon = max(epsilon_min, 1 / (k + 1))
+        epsilon = max(epsilon_min, math.sqrt(1 / (k + 1)))
         # print(epsilon)
         policy = np.full((num_states, num_actions), epsilon / num_actions)
         a_star = np.argmax(Q_values, axis = 1)
@@ -294,7 +294,10 @@ def on_policy_td0_control_sarsa_epsilon_greedy_numba_worker(
 
             # SARSA update
             td_error = r1 + gamma * Q_values[s2][a2] - Q_values[s1][a1]
+            td_error = max(-1, min(1, td_error)) # Clip error to be between -1 and 1
+
             td_error_history[s1][a1] += (td_error ** 2)
+            # td_error_history[s1][a1] = 1.0
             Q_values[s1][a1] = Q_values[s1][a1] + (alpha / (math.sqrt(td_error_history[s1][a1] + 1e-8))) * td_error
 
             # Policy update
