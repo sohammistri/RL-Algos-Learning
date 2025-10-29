@@ -33,8 +33,13 @@ Implement multiple solvers for MDPs staring from model-based (Dynamic Programmin
             - Looks like a starting alpha of 1.0 is good enough to get good convergence.
             - For actions not matching with solution, Q values look close by the second decimal place.
             - We see good results upto second decimal place for exploring states.
+            - Example: `python temporal_diference_0.py --mode ctrl --ctrl-mode exploring_starts --mdp ../data/mdp/episodic-mdp-2-2.txt --ctrl-sol ../data/mdp/sol-episodic-mdp-2-2.txt --num_iters 100000 --max_steps 2000 --alpha 0.5 --lr fixed --num-workers 16 --verbose > logs/exploring-starts/exploring-starts-episodic-mdp-2-2.txt`
         - Second, move the *epsilon greedy SARSA*: policy updated using epsilon greedy, actions selected as same.
             - `epsilon_min` is a **important** parameter to ensure proper exploration. Making it 0 diverges it a lot. But making it high like 0.10 is not really helpful to converge to good value functions
             - Better estimation of optimal actions, lower no of mistakes than explore states.
             - Still need a learning of learning rate using AdaGrad type updates.
+            - Example: `python temporal_diference_0.py --mode ctrl --ctrl-mode epsilon_greedy_sarsa --mdp ../data/mdp/episodic-mdp-50-20.txt --ctrl-sol ../data/mdp/sol-episodic-mdp-50-20.txt --num_iters 100000 --max_steps 2000 --alpha 0.5 --lr fixed --num-workers 16 --epsilon-min 0.01 --verbose > logs/sarsa/epsilon-greedy-sarsa-episodic-mdp-50-20.txt`
         - Third, we implement *off-policy epsilon greedy Q-learning*: Just change the update rule to Q-learning rule.
+            - Need more exploration in this regards, high values like 0.10, 0.20 make sense.
+            - Others stay same
+            - Example: `python temporal_diference_0.py --mode ctrl --ctrl-mode epsilon_greedy_q_learning --mdp ../data/mdp/continuing-mdp-50-20.txt --ctrl-sol ../data/mdp/sol-continuing-mdp-50-20.txt --num_iters 100000 --max_steps 2000 --alpha 0.5 --lr fixed --num-workers 16 --epsilon-min 0.2 --verbose > logs/q-learning/epsilon-greedy-q-learning-continuing-mdp-50-20.txt`
