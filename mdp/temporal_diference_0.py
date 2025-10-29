@@ -87,6 +87,165 @@ def td0_policy_evaluation(
 
     return values
 
+# On policy SARSA Exploring Starts
+@numba.jit(nopython=True) # Add this decorator
+def on_policy_td0_control_sarsa_exploring_starts_numba_worker(
+    P,
+    R,
+    num_states,
+    num_actions,
+    gamma,
+    terminal_states,
+    num_iters: int = 10,
+    max_steps: int = 1000,
+    alpha: float = 0.1,
+    seed: int = None,
+    true_vals: list = None
+):
+    """
+    Numba-compatible JIT compiled version of the on policy SARSA exploring starts algorithm (worked code).
+    """
+    # Numba requires the random number generator to be initialized inside the function.
+    if seed is not None:
+        np.random.seed(seed)
+
+    Q_values = np.zeros((num_states, num_actions), dtype=np.float64)
+    td_error_history = np.zeros((num_states, num_actions), dtype=np.float64)
+    
+    for k in range(num_iters):
+        # sample random state and epsiode
+        while True:
+            s1, a1 = np.random.randint(0, num_states), np.random.randint(0, num_actions)
+            if s1 not in terminal_states:
+                break
+
+        for i in range(max_steps):
+            probs = P[s1, a1, :]
+            s2 = np.searchsorted(np.cumsum(probs), np.random.rand())
+            r1 = R[s1, a1, s2]
+            a2 = np.argmax(Q_values[s2], axis=0)
+
+            # SARSA update
+            td_error = r1 + gamma * Q_values[s2][a2] - Q_values[s1][a1]
+            td_error_history[s1][a1] += (td_error ** 2)
+            Q_values[s1][a1] = Q_values[s1][a1] + alpha / (np.sqrt(td_error_history[s1][a1] + 1e-8))* td_error
+
+            if s2 in terminal_states:
+                break
+            else:
+                s1, a1 = s2, a2
+        
+        # if (k % 100 == 0) or (k == num_iters - 1):
+        #     # get inf norm with true_vals
+        #     optimal_policy = np.argmax(Q_values, axis=1)
+        
+        #     # Manually compute the max along axis=1
+        #     optimal_values = np.zeros(num_states, dtype=np.float64)
+        #     for s in range(num_states):
+        #         optimal_values[s] = np.max(Q_values[s, :])
+
+        #     val_diff = np.abs(optimal_values - true_vals)
+        #     val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
+        #     print(k, val_inf_norm)
+
+    optimal_policy = np.argmax(Q_values, axis=1)
+    
+    # Manually compute the max along axis=1
+    optimal_values = np.zeros(num_states, dtype=np.float64)
+    for s in range(num_states):
+        optimal_values[s] = np.max(Q_values[s, :])
+    
+    return Q_values.copy(), optimal_values, optimal_policy
+
+
+def on_policy_td0_control_sarsa_exploring_starts(
+    mdp: MDP,
+    num_iters: int = 10,
+    max_steps: int = 1000,
+    alpha: float = 0.1,
+    lr: str = "fixed",
+    beta: float = 0.99,
+    epsilon_min: float = 0.01,
+    num_workers: int = 16,
+    seed: int = None,
+    true_vals: list = None
+):
+    """
+    Multithreaded on-policy SARSA algorithm for optimal policy on an MDP.
+    Runs multiple workers in parallel with different seeds, then aggregates results.
+    """
+    num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
+    P, R = mdp.P.copy(), mdp.R.copy()
+    terminal_states = np.array(mdp.terminal_states)
+    
+    # Run workers in parallel
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for i in range(num_workers):
+            worker_seed = seed + i if seed is not None else None
+            future = executor.submit(
+                on_policy_td0_control_sarsa_exploring_starts_numba_worker,
+                P,
+                R,
+                num_states,
+                num_actions,
+                gamma,
+                terminal_states,
+                num_iters,
+                max_steps,
+                alpha,
+                worker_seed,
+                true_vals
+            )
+            futures.append(future)
+        
+        # Collect results from all workers
+        all_Q_values = []
+        all_optimal_values = []
+        all_optimal_policies = []
+        for future in tqdm(as_completed(futures), total=len(futures), desc="SARSA workers", unit="worker"):
+            Q_values, optimal_values, optimal_policy = future.result()
+            all_Q_values.append(Q_values)
+            all_optimal_values.append(optimal_values)
+            all_optimal_policies.append(optimal_policy)
+    
+    # Aggregate policies: for each state, take the most occurring action
+    # Break ties by choosing the action with larger average Q-values
+    aggregated_policy = np.zeros(num_states, dtype=int)
+    aggregated_values = np.zeros(num_states, dtype=float)
+    
+    for s in range(num_states):
+        # Count occurrences of each action
+        action_counts = {}
+        action_values = {}
+        
+        for worker_policy, worker_values in zip(all_optimal_policies, all_optimal_values):
+            action = int(worker_policy[s])
+            if action not in action_counts:
+                action_counts[action] = 0
+                action_values[action] = []
+            action_counts[action] += 1
+            action_values[action].append(worker_values[s])
+        
+        # Find actions with maximum count
+        max_count = max(action_counts.values())
+        max_actions = [a for a, count in action_counts.items() if count == max_count]
+        
+        # If tie, break by choosing action with larger average value
+        if len(max_actions) == 1:
+            a_star = max_actions[0]
+        else:
+            # Calculate average values for tied actions
+            avg_values = {a: np.mean(action_values[a]) for a in max_actions}
+            a_star= max(max_actions, key=lambda a: avg_values[a])
+
+        aggregated_policy[s] = a_star
+        aggregated_values[s] = np.mean(action_values[a_star])
+
+    mean_Q_values = np.mean(np.stack(all_Q_values), axis=0)
+    return aggregated_values, aggregated_policy, mean_Q_values
+
+
 @numba.jit(nopython=True) # Add this decorator
 def on_policy_td0_control_sarsa_worker_numba(
     # NOTE: Numba works best with simple types.
@@ -235,12 +394,14 @@ def on_policy_td0_control_sarsa(
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TD(0) boilerplate for MDPs")
     parser.add_argument('--mode', type=str, required=True, help='Mode to run MC algorithm (eval or ctrl)', choices=['eval', 'ctrl'], default='ctrl')
+    parser.add_argument('--ctrl-mode', type=str, help='Mode to run MC ctrl algorithm (exploring_starts or epsilon_greedy)', choices=['exploring_starts', 'epsilon_greedy'], default='exploring_starts')
     parser.add_argument("--mdp", type=str, required=True, help="Path to MDP file")
     parser.add_argument('--policy', type=str, default=None, help='Path to policy file (optional)')
     parser.add_argument('--eval-sol', type=str, default=None, help='Path to true value-action solution file for infinity-norm evaluation')
     parser.add_argument('--ctrl-sol', type=str, default=None, help='Path to true value-policy solution file for infinity-norm evaluation in control mode')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument("--num_iters", type=int, default=10, help="Number of episodes to run")
+    parser.add_argument("--max_steps", type=int, default=1000, help="Number of states per episode")
     parser.add_argument("--alpha", type=float, default=0.1, help="TD(0) learning rate alpha")
     parser.add_argument("--lr", type=str, choices=["fixed", "adagrad", "rmsprop"], default="fixed", help="Learning rate schedule")
     parser.add_argument("--beta", type=float, default=0.99, help="Beta for RMSProp accumulator")
@@ -302,18 +463,7 @@ def main():
         if args.verbose:
             for s, v in enumerate(value_functions):
                 print(f"{v:.6f} {np.argmax(policy[s])}")
-    elif args.mode == "ctrl":
-        optimal_values, optimal_policy = on_policy_td0_control_sarsa(
-            mdp,
-            args.num_iters,
-            args.alpha,
-            args.lr,
-            args.beta,
-            args.epsilon_min,
-            args.num_workers,
-            args.seed,
-        )
-
+    elif args.mode == "ctrl" and args.ctrl_mode == "exploring_starts":
         # Optional: evaluate infinity norm vs provided solution file
         if args.ctrl_sol:
             true_vals = []
@@ -330,6 +480,21 @@ def main():
             true_vals = np.asarray(true_vals, dtype=float)
             true_policy = np.asarray(true_policy, dtype=int)
             
+
+        optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_exploring_starts(
+            mdp,
+            args.num_iters,
+            args.max_steps,
+            args.alpha,
+            args.lr,
+            args.beta,
+            args.epsilon_min,
+            args.num_workers,
+            args.seed,
+            true_vals
+        )
+
+        if args.ctrl_sol:
             # Compare value functions
             val_diff = np.abs(optimal_values - true_vals)
             val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
@@ -341,6 +506,14 @@ def main():
                 print("policy_match True")
             else:
                 print("policy_match False")
+                # For each state where the actions differ, show the true action Q val and calculated action Q val
+                for s in range(len(optimal_policy)):
+                    calc_action = optimal_policy[s]
+                    true_action = true_policy[s]
+                    if calc_action != true_action:
+                        calc_q = Q_values[s, calc_action]
+                        true_q = Q_values[s, true_action]
+                        print(f"{s}: true_a={true_action} true_q={true_q:.6f} calc_a={calc_action} calc_q={calc_q:.6f}")
 
         if args.verbose:
             for v, a in zip(optimal_values, optimal_policy):

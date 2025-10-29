@@ -28,4 +28,8 @@ Implement multiple solvers for MDPs staring from model-based (Dynamic Programmin
             - *RmsProp (beta 0.99)*: inf_norm 0.082586
     - Implement On-policy TD(0) Policy Optimization (SARSA):
     - **Running Notes**:
-        - Fixed alphas are working better, larger alphas for larger MDPs
+        - First implement *state exploring method*: uses random (s, a) pairs to begin with followed by policy. Policy is taken greedily wrt Q values.
+            - AdaGrad type lr updates still work the best. We want larger changes in the beginning and very small updates in the end.
+            - Looks like a starting alpha of 1.0 is good enough to get good convergence.
+            - For actions not matching with solution, Q values look close by the second decimal place.
+            - We see good results upto second decimal place for exploring states.
