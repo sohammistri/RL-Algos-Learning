@@ -101,7 +101,6 @@ def on_policy_td0_control_sarsa_exploring_starts_numba_worker(
     max_steps: int = 1000,
     alpha: float = 0.1,
     seed: int = None,
-    true_vals: list = None
 ):
     """
     Numba-compatible JIT compiled version of the on policy SARSA exploring starts algorithm (worked code).
@@ -136,19 +135,6 @@ def on_policy_td0_control_sarsa_exploring_starts_numba_worker(
             else:
                 s1, a1 = s2, a2
         
-        # if (k % 100 == 0) or (k == num_iters - 1):
-        #     # get inf norm with true_vals
-        #     optimal_policy = np.argmax(Q_values, axis=1)
-        
-        #     # Manually compute the max along axis=1
-        #     optimal_values = np.zeros(num_states, dtype=np.float64)
-        #     for s in range(num_states):
-        #         optimal_values[s] = np.max(Q_values[s, :])
-
-        #     val_diff = np.abs(optimal_values - true_vals)
-        #     val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
-        #     print(k, val_inf_norm)
-
     optimal_policy = np.argmax(Q_values, axis=1)
     
     # Manually compute the max along axis=1
@@ -168,7 +154,6 @@ def on_policy_td0_control_sarsa_exploring_starts(
     epsilon_min: float = 0.01,
     num_workers: int = 16,
     seed: int = None,
-    true_vals: list = None
 ):
     """
     Multithreaded on-policy SARSA algorithm for optimal policy on an MDP.
@@ -195,7 +180,6 @@ def on_policy_td0_control_sarsa_exploring_starts(
                 max_steps,
                 alpha,
                 worker_seed,
-                true_vals
             )
             futures.append(future)
         
@@ -258,7 +242,6 @@ def on_policy_td0_control_sarsa_epsilon_greedy_numba_worker(
     alpha: float = 0.1,
     epsilon_min: float = 0.01,
     seed: int = None,
-    true_vals: list = None
 ):
     def select_action_epsilon_greedy(q_values, epsilon, num_actions):
         """Selects an action using an epsilon-greedy policy."""
@@ -303,13 +286,6 @@ def on_policy_td0_control_sarsa_epsilon_greedy_numba_worker(
             if s1 in terminal_states:
                 break
         
-        # if (k % 100 == 0) or (k == num_iters - 1):
-        #     if true_vals is not None:
-        #         optimal_values = np.max(Q_values, axis=1)
-        #         val_diff = np.abs(optimal_values - true_vals)
-        #         val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
-        #         print(k, epsilon, val_inf_norm)
-
     optimal_policy = np.argmax(Q_values, axis=1)
     
     # Manually compute the max along axis=1
@@ -328,7 +304,6 @@ def on_policy_td0_control_sarsa_epsilon_greedy(
     epsilon_min: float = 0.01,
     num_workers: int = 16,
     seed: int = None,
-    true_vals: list = None
 ):
     """
     Multithreaded on-policy SARSA algorithm for optimal policy on an MDP.
@@ -356,7 +331,6 @@ def on_policy_td0_control_sarsa_epsilon_greedy(
                 alpha,
                 epsilon_min,
                 worker_seed,
-                true_vals
             )
             futures.append(future)
         
@@ -419,7 +393,6 @@ def off_policy_td0_control_q_learning_epsilon_greedy_numba_worker(
     alpha: float = 0.1,
     epsilon_min: float = 0.01,
     seed: int = None,
-    true_vals: list = None
 ):
     def select_action_epsilon_greedy(q_values, epsilon, num_actions):
         """Selects an action using an epsilon-greedy policy."""
@@ -464,13 +437,6 @@ def off_policy_td0_control_q_learning_epsilon_greedy_numba_worker(
             if s1 in terminal_states:
                 break
         
-        # if (k % 100 == 0) or (k == num_iters - 1):
-        #     if true_vals is not None:
-        #         optimal_values = np.max(Q_values, axis=1)
-        #         val_diff = np.abs(optimal_values - true_vals)
-        #         val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
-        #         print(k, epsilon, val_inf_norm)
-
     optimal_policy = np.argmax(Q_values, axis=1)
     
     # Manually compute the max along axis=1
@@ -489,7 +455,6 @@ def off_policy_td0_control_q_learning_epsilon_greedy(
     epsilon_min: float = 0.01,
     num_workers: int = 16,
     seed: int = None,
-    true_vals: list = None
 ):
     """
     Multithreaded on-policy SARSA algorithm for optimal policy on an MDP.
@@ -517,7 +482,6 @@ def off_policy_td0_control_q_learning_epsilon_greedy(
                 alpha,
                 epsilon_min,
                 worker_seed,
-                true_vals
             )
             futures.append(future)
         
@@ -578,8 +542,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--eval-sol', type=str, default=None, help='Path to true value-action solution file for infinity-norm evaluation')
     parser.add_argument('--ctrl-sol', type=str, default=None, help='Path to true value-policy solution file for infinity-norm evaluation in control mode')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument("--num_iters", type=int, default=10, help="Number of episodes to run")
-    parser.add_argument("--max_steps", type=int, default=1000, help="Number of states per episode")
+    parser.add_argument("--num-iters", type=int, default=10, help="Number of episodes to run")
+    parser.add_argument("--max-steps", type=int, default=1000, help="Number of states per episode")
     parser.add_argument("--alpha", type=float, default=0.1, help="TD(0) learning rate alpha")
     parser.add_argument("--lr", type=str, choices=["fixed", "adagrad", "rmsprop"], default="fixed", help="Learning rate schedule")
     parser.add_argument("--beta", type=float, default=0.99, help="Beta for RMSProp accumulator")
@@ -642,7 +606,44 @@ def main():
             for s, v in enumerate(value_functions):
                 print(f"{v:.6f} {np.argmax(policy[s])}")
     elif args.mode == "ctrl":
-        # Optional: evaluate infinity norm vs provided solution file
+        if args.ctrl_mode == "exploring_starts":
+            optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_exploring_starts(
+                mdp,
+                args.num_iters,
+                args.max_steps,
+                args.alpha,
+                args.lr,
+                args.beta,
+                args.epsilon_min,
+                args.num_workers,
+                args.seed,
+            )
+        
+        elif args.ctrl_mode == "epsilon_greedy_sarsa":
+            optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_epsilon_greedy(
+                mdp,
+                args.num_iters,
+                args.max_steps,
+                args.alpha,
+                args.lr,
+                args.beta,
+                args.epsilon_min,
+                args.num_workers,
+                args.seed,
+            )
+        elif args.ctrl_mode == "epsilon_greedy_q_learning":
+            optimal_values, optimal_policy, Q_values = off_policy_td0_control_q_learning_epsilon_greedy(
+                mdp,
+                args.num_iters,
+                args.max_steps,
+                args.alpha,
+                args.lr,
+                args.beta,
+                args.epsilon_min,
+                args.num_workers,
+                args.seed,
+            )
+
         if args.ctrl_sol:
             true_vals = []
             true_policy = []
@@ -658,48 +659,6 @@ def main():
             true_vals = np.asarray(true_vals, dtype=float)
             true_policy = np.asarray(true_policy, dtype=int)
 
-        if args.ctrl_mode == "exploring_starts":
-            optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_exploring_starts(
-                mdp,
-                args.num_iters,
-                args.max_steps,
-                args.alpha,
-                args.lr,
-                args.beta,
-                args.epsilon_min,
-                args.num_workers,
-                args.seed,
-                true_vals
-            )
-        
-        elif args.ctrl_mode == "epsilon_greedy_sarsa":
-            optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_epsilon_greedy(
-                mdp,
-                args.num_iters,
-                args.max_steps,
-                args.alpha,
-                args.lr,
-                args.beta,
-                args.epsilon_min,
-                args.num_workers,
-                args.seed,
-                true_vals
-            )
-        elif args.ctrl_mode == "epsilon_greedy_q_learning":
-            optimal_values, optimal_policy, Q_values = off_policy_td0_control_q_learning_epsilon_greedy(
-                mdp,
-                args.num_iters,
-                args.max_steps,
-                args.alpha,
-                args.lr,
-                args.beta,
-                args.epsilon_min,
-                args.num_workers,
-                args.seed,
-                true_vals
-            )
-
-        if args.ctrl_sol:
             # Compare value functions
             val_diff = np.abs(optimal_values - true_vals)
             val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
