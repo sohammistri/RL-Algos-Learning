@@ -43,3 +43,10 @@ Implement multiple solvers for MDPs staring from model-based (Dynamic Programmin
             - Need more exploration in this regards, high values like 0.10, 0.20 make sense.
             - Others stay same
             - Example: `python temporal_diference_0.py --mode ctrl --ctrl-mode epsilon_greedy_q_learning --mdp ../data/mdp/continuing-mdp-50-20.txt --ctrl-sol ../data/mdp/sol-continuing-mdp-50-20.txt --num_iters 100000 --max_steps 2000 --alpha 0.5 --lr fixed --num-workers 16 --epsilon-min 0.2 --verbose > logs/q-learning/epsilon-greedy-q-learning-continuing-mdp-50-20.txt`
+- **Temporal Difference(Lambda) Methods**:
+    - Implement the forward and backward view of TD lambda algorithms for policy evaluation.
+        - Again, for our test cases, AdaGrad way works the best.
+        - Lambda param doesn't make a lot difference, alpha and adagrad far more important.
+        - Forward view is implemented off-line (updates made after every episode), backward view is implemented on-line (every step of epsiode, the values are updated)
+        - Eligibility traces need to be updated to zeros **every episode**.
+        - *Best alpha* is 0.01 for testcases.
