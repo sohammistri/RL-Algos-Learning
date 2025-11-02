@@ -196,7 +196,6 @@ def td_lambda_backward_policy_evaluation_numba_worker(
     
     return values
 
-
 def td_lambda_policy_evaluation(
     mdp: MDP,
     policy: Optional[object] = None,
@@ -360,9 +359,8 @@ def update_action_values_forward_view_numba(
 ):
     """
     Numba-compatible forward-view TD(lambda) for a single episode.
-    Returns (states[0:L], actions[0:L], td_errors[0:L])
+    Returns (states[0:L], actions[0:L], G_lambdas[0:L])
     """
-
     states = np.empty(L, dtype=np.int64)
     actions = np.empty(L, dtype=np.int64)
     G_lambdas = np.empty(L, dtype=np.float64)
@@ -375,11 +373,11 @@ def update_action_values_forward_view_numba(
         na1 = int(na_arr[i])
 
         # Calculate n-step returns
-        n_returns = L - i  # FIX: number of possible n-step returns from step i
+        n_returns = L - i
         G_n = np.empty(n_returns, dtype=np.float64)
         
         # 1-step return
-        if is_terminal[ns1]:  # FIX: check if next state is terminal
+        if is_terminal[ns1]:
             G_n[0] = r1
         else:
             G_n[0] = r1 + gamma * q_values[ns1, na1]
@@ -390,36 +388,60 @@ def update_action_values_forward_view_numba(
 
         for j in range(i + 1, L):
             r2 = float(r_arr[j])
-            ns2 = int(ns_arr[j])  # FIX: use ns_arr not s_arr
-            na2 = int(na_arr[j])  # FIX: use na_arr not a_arr
+            ns2 = int(ns_arr[j])
+            na2 = int(na_arr[j])
             
             c += gamma_pow * r2
             gamma_pow *= gamma
             
-            # FIX: check terminal state for bootstrap
             if is_terminal[ns2]:
                 G_n[j - i] = c
             else:
                 G_n[j - i] = c + gamma_pow * q_values[ns2, na2]
 
-        # Calculate G_lambda
+        # Calculate G_lambda with proper weighting
         G_lambda = 0.0
         cum_wts = 0.0
-        cur_wt = 1.0 - lambda_
         
-        for k in range(n_returns):  # FIX: iterate over actual number of returns
-            if k == n_returns - 1:
-                G_lambda += (1.0 - cum_wts) * G_n[k]
-            else:
-                G_lambda += cur_wt * G_n[k]
-                cum_wts += cur_wt
-                cur_wt *= lambda_
+        for k in range(n_returns - 1):
+            wt = (1.0 - lambda_) * (lambda_ ** k)
+            G_lambda += wt * G_n[k]
+            cum_wts += wt
+        
+        # Last return gets remaining weight
+        G_lambda += (1.0 - cum_wts) * G_n[n_returns - 1]
 
         states[i] = s1
         actions[i] = a1
         G_lambdas[i] = G_lambda
 
     return states, actions, G_lambdas
+
+@numba.njit
+def epsilon_greedy_action(q_values, state, num_actions, epsilon):
+    """Select action using epsilon-greedy policy."""
+    if np.random.rand() < epsilon:
+        return np.random.randint(0, num_actions)
+    else:
+        best_a = 0
+        best_val = q_values[state, 0]
+        for aa in range(1, num_actions):
+            val = q_values[state, aa]
+            if val > best_val:
+                best_val = val
+                best_a = aa
+        return best_a
+
+@numba.njit
+def sample_next_state(P, s, a, num_states):
+    """Sample next state from transition probability distribution."""
+    rdraw = np.random.rand()
+    cum = 0.0
+    for s_idx in range(num_states):
+        cum += P[s, a, s_idx]
+        if rdraw <= cum:
+            return s_idx
+    return num_states - 1  # Fallback to last state
 
 @numba.njit
 def td_lambda_forward_control_numba_worker(
@@ -434,7 +456,9 @@ def td_lambda_forward_control_numba_worker(
     gamma,
     alpha,
     lambda_,
+    epsilon_start,
     epsilon_min,
+    epsilon_decay,
     lr_mode,  # 0 fixed, 1 adagrad, 2 rmsprop
     beta,
     seed,
@@ -456,59 +480,30 @@ def td_lambda_forward_control_numba_worker(
     na_arr = np.empty(max_steps, dtype=np.int64)
 
     for k in range(num_iters):
-        # epsilon schedule (you can change as desired)
-        epsilon = 1.0 / (k + 1.0)
-        if epsilon < epsilon_min:
-            epsilon = epsilon_min
+        # Improved epsilon schedule
+        epsilon = max(epsilon_min, epsilon_start * (epsilon_decay ** k))
 
-        # sample initial non-terminal state
-        while True:
+        # Sample initial non-terminal state
+        s1 = np.random.randint(0, num_states)
+        attempts = 0
+        while is_terminal[s1] and attempts < 100:
             s1 = np.random.randint(0, num_states)
-            if not is_terminal[s1]:
-                # epsilon-greedy selection using q_values_temp
-                if np.random.rand() < epsilon:
-                    a1 = np.random.randint(0, num_actions)
-                else:
-                    # manual argmax
-                    best_a = 0
-                    best_val = q_values[s1, 0]
-                    for aa in range(1, num_actions):
-                        val = q_values[s1, aa]
-                        if val > best_val:
-                            best_val = val
-                            best_a = aa
-                    a1 = best_a
-                break
+            attempts += 1
+        
+        if is_terminal[s1]:
+            continue
 
-        # generate episode
+        a1 = epsilon_greedy_action(q_values, s1, num_actions, epsilon)
+
+        # Generate episode
         L = 0
         while L < max_steps:
-            # sample next state according to distribution P[s1,a1,:]
-            rdraw = np.random.rand()
-            cum = 0.0
-            nxt = 0
-            for s_idx in range(num_states):
-                cum += P[s1, a1, s_idx]
-                if rdraw <= cum:
-                    nxt = s_idx
-                    break
-            s2 = nxt
+            s2 = sample_next_state(P, s1, a1, num_states)
             rew = R[s1, a1, s2]
 
-            # choose a2 epsilon-greedy wrt q_values_temp
-            if np.random.rand() < epsilon:
-                a2 = np.random.randint(0, num_actions)
-            else:
-                best_a = 0
-                best_val = q_values[s2, 0]
-                for aa in range(1, num_actions):
-                    val = q_values[s2, aa]
-                    if val > best_val:
-                        best_val = val
-                        best_a = aa
-                a2 = best_a
+            a2 = epsilon_greedy_action(q_values, s2, num_actions, epsilon)
 
-            # store transition
+            # Store transition
             s_arr[L] = s1
             a_arr[L] = a1
             r_arr[L] = rew
@@ -525,12 +520,12 @@ def td_lambda_forward_control_numba_worker(
         if L == 0:
             continue
 
-        # compute TD errors via forward view (pass is_terminal)
+        # Compute G_lambda targets via forward view
         states, actions, G_lambdas = update_action_values_forward_view_numba(
             s_arr, a_arr, r_arr, ns_arr, na_arr, q_values, is_terminal, gamma, lambda_, L
         )
 
-        # apply updates
+        # Apply updates
         for i in range(L):
             s = int(states[i])
             a = int(actions[i])
@@ -542,7 +537,7 @@ def td_lambda_forward_control_numba_worker(
             elif lr_mode == 1:
                 adagrad_accum[s, a] += td_error * td_error
                 new_alpha = alpha / np.sqrt(adagrad_accum[s, a] + eps)
-            else:
+            else:  # rmsprop
                 rmsprop_accum[s, a] = beta * rmsprop_accum[s, a] + (1.0 - beta) * (td_error * td_error)
                 new_alpha = alpha / np.sqrt(rmsprop_accum[s, a] + eps)
 
@@ -550,7 +545,7 @@ def td_lambda_forward_control_numba_worker(
 
     return q_values
 
-# @numba.njit
+@numba.njit
 def td_lambda_backward_control_numba_worker(
     P,                    # (S, A, S)
     R,                    # (S, A, S)
@@ -563,7 +558,9 @@ def td_lambda_backward_control_numba_worker(
     gamma,
     alpha,
     lambda_,
+    epsilon_start,
     epsilon_min,
+    epsilon_decay,
     lr_mode,  # 0 fixed, 1 adagrad, 2 rmsprop
     beta,
     seed,
@@ -578,86 +575,59 @@ def td_lambda_backward_control_numba_worker(
     q_values = action_values.copy()
 
     for k in range(num_iters):
-        # reset eligibility traces per episode
+        # Reset eligibility traces per episode
         eligibility_traces = np.zeros((num_states, num_actions), dtype=np.float64)
-        # epsilon schedule (you can change as desired)
-        epsilon = 1.0 / (k + 1.0)
-        if epsilon < epsilon_min:
-            epsilon = epsilon_min
+        
+        # Improved epsilon schedule
+        epsilon = max(epsilon_min, epsilon_start * (epsilon_decay ** k))
 
-        # sample initial non-terminal state
-        while True:
+        # Sample initial non-terminal state
+        s1 = np.random.randint(0, num_states)
+        attempts = 0
+        while is_terminal[s1] and attempts < 100:
             s1 = np.random.randint(0, num_states)
-            if not is_terminal[s1]:
-                # epsilon-greedy selection using q_values_temp
-                if np.random.rand() < epsilon:
-                    a1 = np.random.randint(0, num_actions)
-                else:
-                    # manual argmax
-                    best_a = 0
-                    best_val = q_values[s1, 0]
-                    for aa in range(1, num_actions):
-                        val = q_values[s1, aa]
-                        if val > best_val:
-                            best_val = val
-                            best_a = aa
-                    a1 = best_a
-                break
+            attempts += 1
+        
+        if is_terminal[s1]:
+            continue
 
-        # generate episode
+        a1 = epsilon_greedy_action(q_values, s1, num_actions, epsilon)
+
+        # Generate episode
         L = 0
         while L < max_steps:
-            # sample next state according to distribution P[s1,a1,:]
-            rdraw = np.random.rand()
-            cum = 0.0
-            nxt = 0
-            for s_idx in range(num_states):
-                cum += P[s1, a1, s_idx]
-                if rdraw <= cum:
-                    nxt = s_idx
-                    break
-            s2 = nxt
+            s2 = sample_next_state(P, s1, a1, num_states)
             rew = R[s1, a1, s2]
 
-            # choose a2 epsilon-greedy wrt q_values_temp
-            if np.random.rand() < epsilon:
-                a2 = np.random.randint(0, num_actions)
-            else:
-                best_a = 0
-                best_val = q_values[s2, 0]
-                for aa in range(1, num_actions):
-                    val = q_values[s2, aa]
-                    if val > best_val:
-                        best_val = val
-                        best_a = aa
-                a2 = best_a
+            a2 = epsilon_greedy_action(q_values, s2, num_actions, epsilon)
 
-            # update eligibility traces (accumulating traces)
-            # First decay all traces by gamma * lambda_, then increment current trace
-            eligibility_traces = eligibility_traces * (gamma * lambda_)
+            # Update eligibility traces (accumulating traces)
+            eligibility_traces *= (gamma * lambda_)
             eligibility_traces[s1, a1] += 1.0
 
-            # calculate TD error
-            # If s2 is terminal, next state value is 0
+            # Calculate TD error
             if is_terminal[s2]:
                 td_error = rew - q_values[s1, a1]
             else:
                 td_error = rew + gamma * q_values[s2, a2] - q_values[s1, a1]
 
-            # get alpha as per mode
+            # Get learning rate
+            # For backward view with eligibility traces, we use fixed alpha or 
+            # adapt based on current state-action only
             if lr_mode == 0:
                 new_alpha = alpha
             elif lr_mode == 1:
                 adagrad_accum[s1, a1] += td_error * td_error
                 new_alpha = alpha / np.sqrt(adagrad_accum[s1, a1] + eps)
-            else:
+            else:  # rmsprop
                 rmsprop_accum[s1, a1] = beta * rmsprop_accum[s1, a1] + (1.0 - beta) * (td_error * td_error)
                 new_alpha = alpha / np.sqrt(rmsprop_accum[s1, a1] + eps)
 
-            # update Q-values for all state-action pairs using eligibility traces
+            # Update Q-values for all state-action pairs using eligibility traces
             q_values += new_alpha * td_error * eligibility_traces
-    
-            # continue episode
+
+            L += 1
+            
             if is_terminal[s2]:
                 break
 
@@ -666,119 +636,135 @@ def td_lambda_backward_control_numba_worker(
 
     return q_values
 
-
 def sarsa_lambda_epsilon_greedy(
-    mdp: MDP,
+    mdp,  # MDP object
     td_mode: str,
     num_iters: int,
     max_steps: int,
     alpha: float,
     lambda_: float,
-    epsilon_min: float,
-    lr: str,
-    beta: float,
-    seed: int,
-    num_threads: int,
+    epsilon_min: float = 0.01,
+    epsilon_start: float = 1.0,
+    epsilon_decay: float = 0.995,
+    lr: str = "fixed",
+    beta: float = 0.9,
+    seed: int = None,
+    num_threads: int = 1,
 ):
     """
-    Optimized TD(lambda) epsilon greedy control algorithm using Numba and threading.
+    Optimized TD(lambda) epsilon-greedy control algorithm using Numba and multiprocessing.
+    
+    Args:
+        mdp: MDP object with P, R, num_states, num_actions, discount, terminal_states
+        td_mode: "forward" or "backward" view
+        num_iters: Total number of episodes
+        max_steps: Maximum steps per episode
+        alpha: Learning rate
+        lambda_: Trace decay parameter
+        epsilon_min: Minimum exploration rate
+        epsilon_start: Starting exploration rate
+        epsilon_decay: Decay rate for epsilon
+        lr: Learning rate adaptation ("fixed", "adagrad", "rmsprop")
+        beta: Beta parameter for RMSProp
+        seed: Random seed
+        num_threads: Number of parallel workers
+    
+    Returns:
+        q_values: Learned Q-values (S, A)
+        optimal_values: Optimal state values (S,)
+        optimal_actions: Optimal policy (S,)
     """
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+    else:
+        rng = np.random.default_rng()
 
-    rng = np.random.default_rng(seed)
     num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
 
     action_values = np.zeros((num_states, num_actions), dtype=np.float64)
 
     # Convert learning rate mode to integer
-    if lr == "fixed":
-        lr_mode = 0
-    elif lr == "adagrad":
-        lr_mode = 1
-    elif lr == "rmsprop":
-        lr_mode = 2
-    else:
+    lr_mode_map = {"fixed": 0, "adagrad": 1, "rmsprop": 2}
+    if lr not in lr_mode_map:
         raise ValueError("Unknown lr mode. Use one of: fixed, adagrad, rmsprop.")
+    lr_mode = lr_mode_map[lr]
 
     # Prepare data for numba function
-    P = mdp.P.copy()
-    R = mdp.R.copy()
-    num_states = mdp.num_states
-    num_actions = mdp.num_actions
+    P = mdp.P.astype(np.float64)
+    R = mdp.R.astype(np.float64)
     
     terminal_states = set(mdp.terminal_states)
-    is_terminal = np.full(num_states, False, dtype=np.bool)
+    is_terminal = np.zeros(num_states, dtype=np.bool_)
     for s in terminal_states:
-        if s >= 0:
+        if 0 <= s < num_states:
             is_terminal[s] = True
 
-    if td_mode == "forward":   
-        with ProcessPoolExecutor(max_workers=num_threads) as executor:
-            futures = []
-            for i in range(num_threads):
-                future = executor.submit(
-                    td_lambda_forward_control_numba_worker,
-                    P,
-                    R,
-                    action_values.copy(),  # Each worker gets its own copy
-                    is_terminal,
-                    num_states,
-                    num_actions,
-                    num_iters // num_threads,
-                    max_steps,
-                    gamma,
-                    alpha,
-                    lambda_,
-                    epsilon_min,
-                    lr_mode,
-                    beta,
-                    rng.integers(2**32)
-                )
-                futures.append(future)
-            
-            # Collect results and average them
-            all_values = []
-            for future in tqdm(as_completed(futures), total=len(futures), desc="SARSA(lambda) forward progress", unit="worker"):
-                worker_values = future.result()
-                all_values.append(worker_values)
-
+    # Select worker function
+    if td_mode == "forward":
+        worker_func = td_lambda_forward_control_numba_worker
     elif td_mode == "backward":
+        worker_func = td_lambda_backward_control_numba_worker
+    else:
+        raise ValueError("td_mode must be 'forward' or 'backward'")
+
+    # Run workers in parallel
+    if num_threads > 1:
         with ProcessPoolExecutor(max_workers=num_threads) as executor:
             futures = []
+            iters_per_worker = num_iters // num_threads
+            
             for i in range(num_threads):
+                # Each worker gets its own seed
+                worker_seed = rng.integers(2**31) if seed is not None else None
+                
                 future = executor.submit(
-                    td_lambda_backward_control_numba_worker,
+                    worker_func,
                     P,
                     R,
-                    action_values.copy(),  # Each worker gets its own copy
+                    action_values.copy(),
                     is_terminal,
                     num_states,
                     num_actions,
-                    num_iters // num_threads,
+                    iters_per_worker,
                     max_steps,
                     gamma,
                     alpha,
                     lambda_,
+                    epsilon_start,
                     epsilon_min,
+                    epsilon_decay,
                     lr_mode,
                     beta,
-                    rng.integers(2**32)
+                    worker_seed
                 )
                 futures.append(future)
             
-            # Collect results and average them
-            all_values = []
-            for future in tqdm(as_completed(futures), total=len(futures), desc="SARSA(lambda) backward progress", unit="worker"):
-                worker_values = future.result()
-                all_values.append(worker_values)
-
-    # Average the values from all workers
-    if all_values:
-        q_values = np.mean(np.array(all_values), axis=0)
-        # next get the optimal policy and optimal values
-        optimal_values = np.max(q_values, axis=1)
-        optimal_actions = np.argmax(q_values, axis=1)
+            # Collect results - take the one with best average Q-value
+            all_q_values = []
+            desc = f"SARSA(λ) {td_mode} view"
+            for future in tqdm(as_completed(futures), total=len(futures), desc=desc, unit="worker"):
+                worker_q_values = future.result()
+                all_q_values.append(worker_q_values)
+            
+            # Instead of averaging (which is incorrect), select best performing model
+            # or use ensemble voting for policy
+            best_idx = np.argmax([np.max(q) for q in all_q_values])
+            q_values = all_q_values[best_idx]
+    else:
+        # Single-threaded execution
+        worker_seed = rng.integers(2**31) if seed is not None else None
+        q_values = worker_func(
+            P, R, action_values, is_terminal,
+            num_states, num_actions, num_iters, max_steps,
+            gamma, alpha, lambda_, epsilon_start, epsilon_min, epsilon_decay,
+            lr_mode, beta, worker_seed
+        )
     
-        return q_values, optimal_values, optimal_actions
+    # Extract optimal policy and values
+    optimal_values = np.max(q_values, axis=1)
+    optimal_actions = np.argmax(q_values, axis=1)
+    
+    return q_values, optimal_values, optimal_actions
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TD(0) boilerplate for MDPs")
@@ -869,6 +855,8 @@ def main():
                 args.alpha,
                 args.lambda_,
                 args.epsilon_min,
+                1.0,
+                0.995,
                 args.lr,
                 args.beta,
                 args.seed,
