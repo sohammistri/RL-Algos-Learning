@@ -31,16 +31,16 @@ def update_state_values_forward_view_numba(
         s1, r1, ns1 = int(s_arr[i]), float(r_arr[i]), int(ns_arr[i])
 
         # Calculate n-step returns
-        G_n = []
+        G_n = np.empty(L, dtype=np.float64)
         c = r1
-        G_n.append(r1 + gamma * values[ns1])
+        G_n[0] = (r1 + gamma * values[ns1])
         gamma_pow = gamma
 
         for j in range(i + 1, L):
             r2, s2 = float(r_arr[j]), int(ns_arr[j])
             c += (gamma_pow * r2)
             gamma_pow *= gamma
-            G_n.append(c + gamma_pow * values[s2])
+            G_n[j - i] = (c + gamma_pow * values[s2])
 
         # Calculate G_lambda
         G_lambda, cum_wts, cur_wt = 0.0, 0.0, 1.0 - lambda_
@@ -345,6 +345,441 @@ def td_lambda_policy_evaluation(
         
         return values
 
+@numba.njit
+def update_action_values_forward_view_numba(
+    s_arr,  # np.ndarray (int64)
+    a_arr,  # np.ndarray (int64)
+    r_arr,  # np.ndarray (float64)
+    ns_arr, # np.ndarray (int64)
+    na_arr, # np.ndarray (int64)
+    q_values, # np.ndarray (float64), shape (S, A)
+    is_terminal, # np.ndarray (bool) shape (S,)
+    gamma,    # float
+    lambda_,  # float
+    L         # int, actual episode length
+):
+    """
+    Numba-compatible forward-view TD(lambda) for a single episode.
+    Returns (states[0:L], actions[0:L], td_errors[0:L])
+    """
+
+    states = np.empty(L, dtype=np.int64)
+    actions = np.empty(L, dtype=np.int64)
+    G_lambdas = np.empty(L, dtype=np.float64)
+
+    for i in range(L):
+        s1 = int(s_arr[i])
+        a1 = int(a_arr[i])
+        r1 = float(r_arr[i])
+        ns1 = int(ns_arr[i])
+        na1 = int(na_arr[i])
+
+        # Calculate n-step returns
+        n_returns = L - i  # FIX: number of possible n-step returns from step i
+        G_n = np.empty(n_returns, dtype=np.float64)
+        
+        # 1-step return
+        if is_terminal[ns1]:  # FIX: check if next state is terminal
+            G_n[0] = r1
+        else:
+            G_n[0] = r1 + gamma * q_values[ns1, na1]
+        
+        # Multi-step returns
+        c = r1
+        gamma_pow = gamma
+
+        for j in range(i + 1, L):
+            r2 = float(r_arr[j])
+            ns2 = int(ns_arr[j])  # FIX: use ns_arr not s_arr
+            na2 = int(na_arr[j])  # FIX: use na_arr not a_arr
+            
+            c += gamma_pow * r2
+            gamma_pow *= gamma
+            
+            # FIX: check terminal state for bootstrap
+            if is_terminal[ns2]:
+                G_n[j - i] = c
+            else:
+                G_n[j - i] = c + gamma_pow * q_values[ns2, na2]
+
+        # Calculate G_lambda
+        G_lambda = 0.0
+        cum_wts = 0.0
+        cur_wt = 1.0 - lambda_
+        
+        for k in range(n_returns):  # FIX: iterate over actual number of returns
+            if k == n_returns - 1:
+                G_lambda += (1.0 - cum_wts) * G_n[k]
+            else:
+                G_lambda += cur_wt * G_n[k]
+                cum_wts += cur_wt
+                cur_wt *= lambda_
+
+        states[i] = s1
+        actions[i] = a1
+        G_lambdas[i] = G_lambda
+
+    return states, actions, G_lambdas
+
+@numba.njit
+def td_lambda_forward_control_numba_worker(
+    P,                    # (S, A, S)
+    R,                    # (S, A, S)
+    action_values,        # (S, A)
+    is_terminal,          # (S,)
+    num_states,
+    num_actions,
+    num_iters,
+    max_steps,
+    gamma,
+    alpha,
+    lambda_,
+    epsilon_min,
+    lr_mode,  # 0 fixed, 1 adagrad, 2 rmsprop
+    beta,
+    seed,
+):
+    if seed is not None:
+        np.random.seed(seed)
+
+    adagrad_accum = np.zeros((num_states, num_actions), dtype=np.float64)
+    rmsprop_accum = np.zeros((num_states, num_actions), dtype=np.float64)
+    eps = 1e-8
+
+    q_values = action_values.copy()
+
+    # Preallocate arrays for one episode
+    s_arr = np.empty(max_steps, dtype=np.int64)
+    a_arr = np.empty(max_steps, dtype=np.int64)
+    r_arr = np.empty(max_steps, dtype=np.float64)
+    ns_arr = np.empty(max_steps, dtype=np.int64)
+    na_arr = np.empty(max_steps, dtype=np.int64)
+
+    for k in range(num_iters):
+        # epsilon schedule (you can change as desired)
+        epsilon = 1.0 / (k + 1.0)
+        if epsilon < epsilon_min:
+            epsilon = epsilon_min
+
+        # sample initial non-terminal state
+        while True:
+            s1 = np.random.randint(0, num_states)
+            if not is_terminal[s1]:
+                # epsilon-greedy selection using q_values_temp
+                if np.random.rand() < epsilon:
+                    a1 = np.random.randint(0, num_actions)
+                else:
+                    # manual argmax
+                    best_a = 0
+                    best_val = q_values[s1, 0]
+                    for aa in range(1, num_actions):
+                        val = q_values[s1, aa]
+                        if val > best_val:
+                            best_val = val
+                            best_a = aa
+                    a1 = best_a
+                break
+
+        # generate episode
+        L = 0
+        while L < max_steps:
+            # sample next state according to distribution P[s1,a1,:]
+            rdraw = np.random.rand()
+            cum = 0.0
+            nxt = 0
+            for s_idx in range(num_states):
+                cum += P[s1, a1, s_idx]
+                if rdraw <= cum:
+                    nxt = s_idx
+                    break
+            s2 = nxt
+            rew = R[s1, a1, s2]
+
+            # choose a2 epsilon-greedy wrt q_values_temp
+            if np.random.rand() < epsilon:
+                a2 = np.random.randint(0, num_actions)
+            else:
+                best_a = 0
+                best_val = q_values[s2, 0]
+                for aa in range(1, num_actions):
+                    val = q_values[s2, aa]
+                    if val > best_val:
+                        best_val = val
+                        best_a = aa
+                a2 = best_a
+
+            # store transition
+            s_arr[L] = s1
+            a_arr[L] = a1
+            r_arr[L] = rew
+            ns_arr[L] = s2
+            na_arr[L] = a2
+            L += 1
+
+            if is_terminal[s2]:
+                break
+
+            s1 = s2
+            a1 = a2
+
+        if L == 0:
+            continue
+
+        # compute TD errors via forward view (pass is_terminal)
+        states, actions, G_lambdas = update_action_values_forward_view_numba(
+            s_arr, a_arr, r_arr, ns_arr, na_arr, q_values, is_terminal, gamma, lambda_, L
+        )
+
+        # apply updates
+        for i in range(L):
+            s = int(states[i])
+            a = int(actions[i])
+            G_lambda = float(G_lambdas[i])
+            td_error = G_lambda - q_values[s, a]
+
+            if lr_mode == 0:
+                new_alpha = alpha
+            elif lr_mode == 1:
+                adagrad_accum[s, a] += td_error * td_error
+                new_alpha = alpha / np.sqrt(adagrad_accum[s, a] + eps)
+            else:
+                rmsprop_accum[s, a] = beta * rmsprop_accum[s, a] + (1.0 - beta) * (td_error * td_error)
+                new_alpha = alpha / np.sqrt(rmsprop_accum[s, a] + eps)
+
+            q_values[s, a] += new_alpha * td_error
+
+    return q_values
+
+# @numba.njit
+def td_lambda_backward_control_numba_worker(
+    P,                    # (S, A, S)
+    R,                    # (S, A, S)
+    action_values,        # (S, A)
+    is_terminal,          # (S,)
+    num_states,
+    num_actions,
+    num_iters,
+    max_steps,
+    gamma,
+    alpha,
+    lambda_,
+    epsilon_min,
+    lr_mode,  # 0 fixed, 1 adagrad, 2 rmsprop
+    beta,
+    seed,
+):
+    if seed is not None:
+        np.random.seed(seed)
+
+    adagrad_accum = np.zeros((num_states, num_actions), dtype=np.float64)
+    rmsprop_accum = np.zeros((num_states, num_actions), dtype=np.float64)
+    eps = 1e-8
+
+    q_values = action_values.copy()
+
+    for k in range(num_iters):
+        # reset eligibility traces per episode
+        eligibility_traces = np.zeros((num_states, num_actions), dtype=np.float64)
+        # epsilon schedule (you can change as desired)
+        epsilon = 1.0 / (k + 1.0)
+        if epsilon < epsilon_min:
+            epsilon = epsilon_min
+
+        # sample initial non-terminal state
+        while True:
+            s1 = np.random.randint(0, num_states)
+            if not is_terminal[s1]:
+                # epsilon-greedy selection using q_values_temp
+                if np.random.rand() < epsilon:
+                    a1 = np.random.randint(0, num_actions)
+                else:
+                    # manual argmax
+                    best_a = 0
+                    best_val = q_values[s1, 0]
+                    for aa in range(1, num_actions):
+                        val = q_values[s1, aa]
+                        if val > best_val:
+                            best_val = val
+                            best_a = aa
+                    a1 = best_a
+                break
+
+        # generate episode
+        L = 0
+        while L < max_steps:
+            # sample next state according to distribution P[s1,a1,:]
+            rdraw = np.random.rand()
+            cum = 0.0
+            nxt = 0
+            for s_idx in range(num_states):
+                cum += P[s1, a1, s_idx]
+                if rdraw <= cum:
+                    nxt = s_idx
+                    break
+            s2 = nxt
+            rew = R[s1, a1, s2]
+
+            # choose a2 epsilon-greedy wrt q_values_temp
+            if np.random.rand() < epsilon:
+                a2 = np.random.randint(0, num_actions)
+            else:
+                best_a = 0
+                best_val = q_values[s2, 0]
+                for aa in range(1, num_actions):
+                    val = q_values[s2, aa]
+                    if val > best_val:
+                        best_val = val
+                        best_a = aa
+                a2 = best_a
+
+            # update eligibility traces (accumulating traces)
+            # First decay all traces by gamma * lambda_, then increment current trace
+            eligibility_traces = eligibility_traces * (gamma * lambda_)
+            eligibility_traces[s1, a1] += 1.0
+
+            # calculate TD error
+            # If s2 is terminal, next state value is 0
+            if is_terminal[s2]:
+                td_error = rew - q_values[s1, a1]
+            else:
+                td_error = rew + gamma * q_values[s2, a2] - q_values[s1, a1]
+
+            # get alpha as per mode
+            if lr_mode == 0:
+                new_alpha = alpha
+            elif lr_mode == 1:
+                adagrad_accum[s1, a1] += td_error * td_error
+                new_alpha = alpha / np.sqrt(adagrad_accum[s1, a1] + eps)
+            else:
+                rmsprop_accum[s1, a1] = beta * rmsprop_accum[s1, a1] + (1.0 - beta) * (td_error * td_error)
+                new_alpha = alpha / np.sqrt(rmsprop_accum[s1, a1] + eps)
+
+            # update Q-values for all state-action pairs using eligibility traces
+            q_values += new_alpha * td_error * eligibility_traces
+    
+            # continue episode
+            if is_terminal[s2]:
+                break
+
+            s1 = s2
+            a1 = a2
+
+    return q_values
+
+
+def sarsa_lambda_epsilon_greedy(
+    mdp: MDP,
+    td_mode: str,
+    num_iters: int,
+    max_steps: int,
+    alpha: float,
+    lambda_: float,
+    epsilon_min: float,
+    lr: str,
+    beta: float,
+    seed: int,
+    num_threads: int,
+):
+    """
+    Optimized TD(lambda) epsilon greedy control algorithm using Numba and threading.
+    """
+
+    rng = np.random.default_rng(seed)
+    num_states, num_actions, gamma = mdp.num_states, mdp.num_actions, mdp.discount
+
+    action_values = np.zeros((num_states, num_actions), dtype=np.float64)
+
+    # Convert learning rate mode to integer
+    if lr == "fixed":
+        lr_mode = 0
+    elif lr == "adagrad":
+        lr_mode = 1
+    elif lr == "rmsprop":
+        lr_mode = 2
+    else:
+        raise ValueError("Unknown lr mode. Use one of: fixed, adagrad, rmsprop.")
+
+    # Prepare data for numba function
+    P = mdp.P.copy()
+    R = mdp.R.copy()
+    num_states = mdp.num_states
+    num_actions = mdp.num_actions
+    
+    terminal_states = set(mdp.terminal_states)
+    is_terminal = np.full(num_states, False, dtype=np.bool)
+    for s in terminal_states:
+        if s >= 0:
+            is_terminal[s] = True
+
+    if td_mode == "forward":   
+        with ProcessPoolExecutor(max_workers=num_threads) as executor:
+            futures = []
+            for i in range(num_threads):
+                future = executor.submit(
+                    td_lambda_forward_control_numba_worker,
+                    P,
+                    R,
+                    action_values.copy(),  # Each worker gets its own copy
+                    is_terminal,
+                    num_states,
+                    num_actions,
+                    num_iters // num_threads,
+                    max_steps,
+                    gamma,
+                    alpha,
+                    lambda_,
+                    epsilon_min,
+                    lr_mode,
+                    beta,
+                    rng.integers(2**32)
+                )
+                futures.append(future)
+            
+            # Collect results and average them
+            all_values = []
+            for future in tqdm(as_completed(futures), total=len(futures), desc="SARSA(lambda) forward progress", unit="worker"):
+                worker_values = future.result()
+                all_values.append(worker_values)
+
+    elif td_mode == "backward":
+        with ProcessPoolExecutor(max_workers=num_threads) as executor:
+            futures = []
+            for i in range(num_threads):
+                future = executor.submit(
+                    td_lambda_backward_control_numba_worker,
+                    P,
+                    R,
+                    action_values.copy(),  # Each worker gets its own copy
+                    is_terminal,
+                    num_states,
+                    num_actions,
+                    num_iters // num_threads,
+                    max_steps,
+                    gamma,
+                    alpha,
+                    lambda_,
+                    epsilon_min,
+                    lr_mode,
+                    beta,
+                    rng.integers(2**32)
+                )
+                futures.append(future)
+            
+            # Collect results and average them
+            all_values = []
+            for future in tqdm(as_completed(futures), total=len(futures), desc="SARSA(lambda) backward progress", unit="worker"):
+                worker_values = future.result()
+                all_values.append(worker_values)
+
+    # Average the values from all workers
+    if all_values:
+        q_values = np.mean(np.array(all_values), axis=0)
+        # next get the optimal policy and optimal values
+        optimal_values = np.max(q_values, axis=1)
+        optimal_actions = np.argmax(q_values, axis=1)
+    
+        return q_values, optimal_values, optimal_actions
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TD(0) boilerplate for MDPs")
     parser.add_argument('--mode', type=str, required=True, help='Mode to run TD lambda algorithm (eval or ctrl)', choices=['eval', 'ctrl'], default='ctrl')
@@ -371,6 +806,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
+    print(args)
 
     # Load MDP (episodic MDP placeholder; adjust as needed for your MDP type)
     mdp = MDP(args.mdp)
@@ -424,32 +860,20 @@ def main():
             for s, v in enumerate(value_functions):
                 print(f"{v:.6f} {np.argmax(policy[s])}")
     elif args.mode == "ctrl":
-        pass
-        # if args.ctrl_mode == "exploring_starts":
-        #     optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_exploring_starts(
-        #         mdp,
-        #         args.num_iters,
-        #         args.max_steps,
-        #         args.alpha,
-        #         args.lr,
-        #         args.beta,
-        #         args.epsilon_min,
-        #         args.num_workers,
-        #         args.seed,
-        #     )
-        
-        # elif args.ctrl_mode == "epsilon_greedy_sarsa":
-        #     optimal_values, optimal_policy, Q_values = on_policy_td0_control_sarsa_epsilon_greedy(
-        #         mdp,
-        #         args.num_iters,
-        #         args.max_steps,
-        #         args.alpha,
-        #         args.lr,
-        #         args.beta,
-        #         args.epsilon_min,
-        #         args.num_workers,
-        #         args.seed,
-        #     )
+        if args.ctrl_mode == "epsilon_greedy_sarsa":
+            Q_values, optimal_values, optimal_policy = sarsa_lambda_epsilon_greedy(
+                mdp,
+                args.td_mode,
+                args.num_iters,
+                args.max_steps,
+                args.alpha,
+                args.lambda_,
+                args.epsilon_min,
+                args.lr,
+                args.beta,
+                args.seed,
+                args.num_workers
+            )
         # elif args.ctrl_mode == "epsilon_greedy_q_learning":
         #     optimal_values, optimal_policy, Q_values = off_policy_td0_control_q_learning_epsilon_greedy(
         #         mdp,
@@ -463,44 +887,44 @@ def main():
         #         args.seed,
         #     )
 
-        # if args.ctrl_sol:
-        #     true_vals = []
-        #     true_policy = []
-        #     with open(args.ctrl_sol, 'r') as f:
-        #         for line in f:
-        #             line = line.strip()
-        #             if not line:
-        #                 continue
-        #             parts = line.split()
-        #             # Expect: value policy
-        #             true_vals.append(float(parts[0]))
-        #             true_policy.append(int(parts[1]))
-        #     true_vals = np.asarray(true_vals, dtype=float)
-        #     true_policy = np.asarray(true_policy, dtype=int)
+        if args.ctrl_sol:
+            true_vals = []
+            true_policy = []
+            with open(args.ctrl_sol, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = line.split()
+                    # Expect: value policy
+                    true_vals.append(float(parts[0]))
+                    true_policy.append(int(parts[1]))
+            true_vals = np.asarray(true_vals, dtype=float)
+            true_policy = np.asarray(true_policy, dtype=int)
 
-        #     # Compare value functions
-        #     val_diff = np.abs(optimal_values - true_vals)
-        #     val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
-        #     print(f"value_inf_norm {val_inf_norm:.6f}")
+            # Compare value functions
+            val_diff = np.abs(optimal_values - true_vals)
+            val_inf_norm = float(np.max(val_diff)) if val_diff.size > 0 else 0.0
+            print(f"value_inf_norm {val_inf_norm:.6f}")
             
-        #     # Compare policies (check if any actions differ)
-        #     policy_matches = np.array_equal(optimal_policy, true_policy)
-        #     if policy_matches:
-        #         print("policy_match True")
-        #     else:
-        #         print("policy_match False")
-        #         # For each state where the actions differ, show the true action Q val and calculated action Q val
-        #         for s in range(len(optimal_policy)):
-        #             calc_action = optimal_policy[s]
-        #             true_action = true_policy[s]
-        #             if calc_action != true_action:
-        #                 calc_q = Q_values[s, calc_action]
-        #                 true_q = Q_values[s, true_action]
-        #                 print(f"{s}: true_a={true_action} true_q={true_q:.6f} calc_a={calc_action} calc_q={calc_q:.6f}")
+            # Compare policies (check if any actions differ)
+            policy_matches = np.array_equal(optimal_policy, true_policy)
+            if policy_matches:
+                print("policy_match True")
+            else:
+                print("policy_match False")
+                # For each state where the actions differ, show the true action Q val and calculated action Q val
+                for s in range(len(optimal_policy)):
+                    calc_action = optimal_policy[s]
+                    true_action = true_policy[s]
+                    if calc_action != true_action:
+                        calc_q = Q_values[s, calc_action]
+                        true_q = Q_values[s, true_action]
+                        print(f"{s}: true_a={true_action} true_q={true_q:.6f} calc_a={calc_action} calc_q={calc_q:.6f}")
 
-        # if args.verbose:
-        #     for v, a in zip(optimal_values, optimal_policy):
-        #         print(f"{v:.6f} {a}")
+        if args.verbose:
+            for v, a in zip(optimal_values, optimal_policy):
+                print(f"{v:.6f} {a}")
 
 if __name__ == "__main__":
     main()
