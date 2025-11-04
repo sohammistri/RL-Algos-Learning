@@ -423,26 +423,21 @@ def epsilon_greedy_action(q_values, state, num_actions, epsilon):
     if np.random.rand() < epsilon:
         return np.random.randint(0, num_actions)
     else:
-        best_a = 0
-        best_val = q_values[state, 0]
-        for aa in range(1, num_actions):
-            val = q_values[state, aa]
-            if val > best_val:
-                best_val = val
-                best_a = aa
-        return best_a
+        return np.argmax(q_values[state, :num_actions])
 
 @numba.njit
 def sample_next_state(P, s, a, num_states):
     """Sample next state from transition probability distribution."""
-    rdraw = np.random.rand()
-    cum = 0.0
-    for s_idx in range(num_states):
-        cum += P[s, a, s_idx]
-        if rdraw <= cum:
-            return s_idx
-    return num_states - 1  # Fallback to last state
-
+    probs = P[s, a, :num_states]
+    # Numba-safe categorical sample using inverse transform sampling
+    cumsum = 0.0
+    rnd = np.random.rand()
+    for i in range(num_states):
+        cumsum += probs[i]
+        if rnd < cumsum:
+            return i
+    return num_states - 1  # fallback, should not happen if probs sum to 1
+    
 @numba.njit
 def td_lambda_forward_control_numba_worker(
     P,                    # (S, A, S)
@@ -558,9 +553,7 @@ def td_lambda_backward_control_numba_worker(
     gamma,
     alpha,
     lambda_,
-    epsilon_start,
     epsilon_min,
-    epsilon_decay,
     lr_mode,  # 0 fixed, 1 adagrad, 2 rmsprop
     beta,
     seed,
@@ -578,19 +571,13 @@ def td_lambda_backward_control_numba_worker(
         # Reset eligibility traces per episode
         eligibility_traces = np.zeros((num_states, num_actions), dtype=np.float64)
         
-        # Improved epsilon schedule
-        epsilon = max(epsilon_min, epsilon_start * (epsilon_decay ** k))
+        epsilon = max(epsilon_min, 1 / (k + 1))
 
         # Sample initial non-terminal state
         s1 = np.random.randint(0, num_states)
-        attempts = 0
-        while is_terminal[s1] and attempts < 100:
+        while is_terminal[s1]:
             s1 = np.random.randint(0, num_states)
-            attempts += 1
         
-        if is_terminal[s1]:
-            continue
-
         a1 = epsilon_greedy_action(q_values, s1, num_actions, epsilon)
 
         # Generate episode
@@ -602,14 +589,16 @@ def td_lambda_backward_control_numba_worker(
             a2 = epsilon_greedy_action(q_values, s2, num_actions, epsilon)
 
             # Update eligibility traces (accumulating traces)
-            eligibility_traces *= (gamma * lambda_)
             eligibility_traces[s1, a1] += 1.0
 
             # Calculate TD error
             if is_terminal[s2]:
-                td_error = rew - q_values[s1, a1]
+                delta = rew - q_values[s1, a1]
             else:
-                td_error = rew + gamma * q_values[s2, a2] - q_values[s1, a1]
+                delta = rew + gamma * q_values[s2, a2] - q_values[s1, a1]
+
+            td_error = delta * eligibility_traces
+            td_error_cur_state = td_error[s1, a1]
 
             # Get learning rate
             # For backward view with eligibility traces, we use fixed alpha or 
@@ -617,14 +606,15 @@ def td_lambda_backward_control_numba_worker(
             if lr_mode == 0:
                 new_alpha = alpha
             elif lr_mode == 1:
-                adagrad_accum[s1, a1] += td_error * td_error
+                adagrad_accum[s1, a1] += td_error_cur_state * td_error_cur_state
                 new_alpha = alpha / np.sqrt(adagrad_accum[s1, a1] + eps)
             else:  # rmsprop
-                rmsprop_accum[s1, a1] = beta * rmsprop_accum[s1, a1] + (1.0 - beta) * (td_error * td_error)
+                rmsprop_accum[s1, a1] = beta * rmsprop_accum[s1, a1] + (1.0 - beta) * (td_error_cur_state * td_error_cur_state)
                 new_alpha = alpha / np.sqrt(rmsprop_accum[s1, a1] + eps)
 
-            # Update Q-values for all state-action pairs using eligibility traces
+            # Update Q-values and eligibility traces for all state-action pairs using eligibility traces
             q_values += new_alpha * td_error * eligibility_traces
+            eligibility_traces *= (gamma * lambda_)
 
             L += 1
             
@@ -644,8 +634,6 @@ def sarsa_lambda_epsilon_greedy(
     alpha: float,
     lambda_: float,
     epsilon_min: float = 0.01,
-    epsilon_start: float = 1.0,
-    epsilon_decay: float = 0.995,
     lr: str = "fixed",
     beta: float = 0.9,
     seed: int = None,
@@ -730,9 +718,7 @@ def sarsa_lambda_epsilon_greedy(
                     gamma,
                     alpha,
                     lambda_,
-                    epsilon_start,
                     epsilon_min,
-                    epsilon_decay,
                     lr_mode,
                     beta,
                     worker_seed
@@ -756,7 +742,7 @@ def sarsa_lambda_epsilon_greedy(
         q_values = worker_func(
             P, R, action_values, is_terminal,
             num_states, num_actions, num_iters, max_steps,
-            gamma, alpha, lambda_, epsilon_start, epsilon_min, epsilon_decay,
+            gamma, alpha, lambda_, epsilon_min,
             lr_mode, beta, worker_seed
         )
     
@@ -855,8 +841,6 @@ def main():
                 args.alpha,
                 args.lambda_,
                 args.epsilon_min,
-                1.0,
-                0.995,
                 args.lr,
                 args.beta,
                 args.seed,
