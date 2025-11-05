@@ -50,3 +50,8 @@ Implement multiple solvers for MDPs staring from model-based (Dynamic Programmin
         - Forward view is implemented off-line (updates made after every episode), backward view is implemented on-line (every step of epsiode, the values are updated)
         - Eligibility traces need to be updated to zeros **every episode**.
         - *Best alpha* is 0.01 for testcases.
+    - Implemented forward and backward view of TD lambda control algorithms. These are on-policy SARSA algorithms.
+        - Adagrad is best, *lower lambda* usually is the better choice. Large lambdas tensing to MC are quite unstable and do not converge well.
+        - High initial alpha (1.0) and a min epsilon of 0.01 was kept to have atleast some exploration.
+        - Forward view updates Q values at the end of every episode and every episode follows the epsilon greedy algo wrt Q values.
+        - Backward view uses eligibility trace per action per episode.

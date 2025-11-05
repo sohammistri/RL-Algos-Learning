@@ -438,7 +438,7 @@ def sample_next_state(P, s, a, num_states):
             return i
     return num_states - 1  # fallback, should not happen if probs sum to 1
     
-@numba.njit
+# @numba.njit
 def td_lambda_forward_control_numba_worker(
     P,                    # (S, A, S)
     R,                    # (S, A, S)
@@ -451,9 +451,7 @@ def td_lambda_forward_control_numba_worker(
     gamma,
     alpha,
     lambda_,
-    epsilon_start,
     epsilon_min,
-    epsilon_decay,
     lr_mode,  # 0 fixed, 1 adagrad, 2 rmsprop
     beta,
     seed,
@@ -474,20 +472,17 @@ def td_lambda_forward_control_numba_worker(
     ns_arr = np.empty(max_steps, dtype=np.int64)
     na_arr = np.empty(max_steps, dtype=np.int64)
 
-    for k in range(num_iters):
+    for k in tqdm(range(num_iters), desc="Forward TD(λ) Control"):
+    # for k in range(num_iters):
         # Improved epsilon schedule
-        epsilon = max(epsilon_min, epsilon_start * (epsilon_decay ** k))
+        epsilon = max(epsilon_min, 1/ (k + 1))
 
         # Sample initial non-terminal state
         s1 = np.random.randint(0, num_states)
-        attempts = 0
-        while is_terminal[s1] and attempts < 100:
-            s1 = np.random.randint(0, num_states)
-            attempts += 1
-        
-        if is_terminal[s1]:
-            continue
 
+        while is_terminal[s1]:
+            s1 = np.random.randint(0, num_states)
+        
         a1 = epsilon_greedy_action(q_values, s1, num_actions, epsilon)
 
         # Generate episode
@@ -567,6 +562,7 @@ def td_lambda_backward_control_numba_worker(
 
     q_values = action_values.copy()
 
+    # for k in tqdm(range(num_iters), desc="Backward TD(λ) Control"):
     for k in range(num_iters):
         # Reset eligibility traces per episode
         eligibility_traces = np.zeros((num_states, num_actions), dtype=np.float64)
@@ -846,6 +842,7 @@ def main():
                 args.seed,
                 args.num_workers
             )
+            
         # elif args.ctrl_mode == "epsilon_greedy_q_learning":
         #     optimal_values, optimal_policy, Q_values = off_policy_td0_control_q_learning_epsilon_greedy(
         #         mdp,
